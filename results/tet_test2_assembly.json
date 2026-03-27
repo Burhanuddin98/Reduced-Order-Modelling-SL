@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "name": "tet_test2_assembly",
+    "suite": "tet_validation",
+    "timestamp": "2026-03-27T17:36:48.150594+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "mesh": {
+      "N_dof": 707,
+      "N_el": 378,
+      "h_target": 0.3
+    },
+    "volume": {
+      "computed": 0.9999999999999953,
+      "expected": 1.0,
+      "error": 4.6629367034256575e-15
+    },
+    "surface": {
+      "computed": 5.999999999999999,
+      "expected": 6.0,
+      "error": 8.881784197001252e-16
+    },
+    "stiffness_asymmetry": 5.551115123125783e-17,
+    "stiffness_rowsum": 6.817463260588852e-16,
+    "patch_test_interior": 5.190292640122607e-15,
+    "min_lumped_mass": 0.00020094038735780424,
+    "negative_mass_entries": 0,
+    "v_S_v": 502.6655623003759,
+    "all_pass": true
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "name": "tet_test4_lshape_fom",
+    "suite": "tet_validation",
+    "timestamp": "2026-03-27T17:36:58.801037+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "domain": {
+      "type": "L-shape extruded",
+      "Lx": 4.0,
+      "Ly": 3.0,
+      "notch_x": 2.0,
+      "notch_y": 1.5,
+      "Lz": 2.0
+    },
+    "mesh": {
+      "N_dof": 3619,
+      "N_el": 2190,
+      "P": 2,
+      "h_target": 0.4
+    },
+    "volume": {
+      "computed": 17.999999999999915,
+      "expected": 18.0
+    },
+    "surface": {
+      "computed": 46.0,
+      "expected": 46.0
+    },
+    "pr_energy_drift": 2.882533014407029e-05,
+    "fi_energy_ratio": 0.04586742852435477,
+    "fi_monotonic_decay": true,
+    "dt": 3e-05,
+    "T": 0.03
+  }
+}

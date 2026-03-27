@@ -1,0 +1,36 @@
+{
+  "metadata": {
+    "name": "tet_test5_lshape_rom",
+    "suite": "tet_validation",
+    "timestamp": "2026-03-27T17:37:00.621283+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "N_dof": 3619,
+    "N_el": 2190,
+    "Nrb_auto": 51,
+    "fom_time_s": 0.512077300000783,
+    "sweep": [
+      {
+        "Nrb": 5,
+        "speedup": 70.95038379760294,
+        "error_Linf": 0.037895019674802286
+      },
+      {
+        "Nrb": 10,
+        "speedup": 70.80812787721023,
+        "error_Linf": 0.041204318732352974
+      },
+      {
+        "Nrb": 20,
+        "speedup": 50.64907075109271,
+        "error_Linf": 0.020958629846848053
+      },
+      {
+        "Nrb": 40,
+        "speedup": 13.471287076587014,
+        "error_Linf": 0.031708720195689946
+      }
+    ]
+  }
+}
