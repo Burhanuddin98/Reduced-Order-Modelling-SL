@@ -22,6 +22,12 @@ Node ordering follows Gmsh convention for 10-node tet (type 11):
 import numpy as np
 from scipy import sparse
 
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+
 
 # ===================================================================
 # P=2 Lagrange basis on the reference tetrahedron
@@ -500,89 +506,254 @@ class TetMesh3D:
 # Assembly
 # ===================================================================
 
+def _shape_and_grad_at_quad_pts(quad_pts):
+    """Precompute shape functions and gradients at all quadrature points."""
+    n_q = len(quad_pts)
+    N_all = np.zeros((n_q, 10))
+    dN_all = np.zeros((n_q, 3, 10))
+    for q in range(n_q):
+        r, s, t = quad_pts[q]
+        N_all[q] = tet_shape_p2(r, s, t)
+        dN_all[q] = tet_shape_grad_p2(r, s, t)
+    return N_all, dN_all
+
+
+def _det3(J):
+    """3x3 determinant without numpy overhead."""
+    return (J[0,0]*(J[1,1]*J[2,2]-J[1,2]*J[2,1])
+           -J[0,1]*(J[1,0]*J[2,2]-J[1,2]*J[2,0])
+           +J[0,2]*(J[1,0]*J[2,1]-J[1,1]*J[2,0]))
+
+
+def _inv3(J):
+    """3x3 inverse without numpy overhead."""
+    d = _det3(J)
+    Ji = np.empty((3, 3))
+    Ji[0,0] = (J[1,1]*J[2,2]-J[1,2]*J[2,1])/d
+    Ji[0,1] = (J[0,2]*J[2,1]-J[0,1]*J[2,2])/d
+    Ji[0,2] = (J[0,1]*J[1,2]-J[0,2]*J[1,1])/d
+    Ji[1,0] = (J[1,2]*J[2,0]-J[1,0]*J[2,2])/d
+    Ji[1,1] = (J[0,0]*J[2,2]-J[0,2]*J[2,0])/d
+    Ji[1,2] = (J[0,2]*J[1,0]-J[0,0]*J[1,2])/d
+    Ji[2,0] = (J[1,0]*J[2,1]-J[1,1]*J[2,0])/d
+    Ji[2,1] = (J[0,1]*J[2,0]-J[0,0]*J[2,1])/d
+    Ji[2,2] = (J[0,0]*J[1,1]-J[0,1]*J[1,0])/d
+    return Ji
+
+
+def _assemble_elements_python(all_nodes, all_conn, N_all, dN_all, wts, N_dof):
+    """Pure Python element assembly (fallback when Numba unavailable)."""
+    N_el = len(all_conn)
+    n_q = len(wts)
+    M_lumped = np.zeros(N_dof)
+
+    # Preallocate COO arrays (upper bound: N_el * 100 nonzeros)
+    max_nnz = N_el * 100
+    coo_r = np.empty(max_nnz, dtype=np.int64)
+    coo_c = np.empty(max_nnz, dtype=np.int64)
+    coo_v = np.empty(max_nnz)
+    nnz = 0
+
+    for e in range(N_el):
+        dof = all_conn[e]
+        coords = all_nodes[dof]
+
+        # Mass (consistent then HRZ lump)
+        M_diag_e = np.zeros(10)
+        total_mass = 0.0
+        for q in range(n_q):
+            dN = dN_all[q]  # (3, 10)
+            J = dN @ coords
+            detJ = abs(_det3(J))
+            w = wts[q] * detJ
+            N_q = N_all[q]
+            for i in range(10):
+                M_diag_e[i] += w * N_q[i] * N_q[i]
+                total_mass += w * N_q[i]  # sum of consistent mass
+
+        # HRZ scale
+        diag_sum = M_diag_e.sum()
+        if diag_sum > 0:
+            scale = total_mass / diag_sum
+            for i in range(10):
+                M_lumped[dof[i]] += M_diag_e[i] * scale
+
+        # Stiffness
+        S_e = np.zeros((10, 10))
+        for q in range(n_q):
+            dN = dN_all[q]
+            J = dN @ coords
+            detJ = abs(_det3(J))
+            Ji = _inv3(J)
+            dN_phys = Ji @ dN  # (3, 10)
+            w = wts[q] * detJ
+            for i in range(10):
+                for j in range(i, 10):
+                    val = w * (dN_phys[0,i]*dN_phys[0,j]
+                             + dN_phys[1,i]*dN_phys[1,j]
+                             + dN_phys[2,i]*dN_phys[2,j])
+                    S_e[i, j] += val
+                    if i != j:
+                        S_e[j, i] += val
+
+        # Scatter
+        for i in range(10):
+            for j in range(10):
+                if abs(S_e[i, j]) > 1e-30:
+                    if nnz >= max_nnz:
+                        coo_r = np.append(coo_r, np.empty(max_nnz, dtype=np.int64))
+                        coo_c = np.append(coo_c, np.empty(max_nnz, dtype=np.int64))
+                        coo_v = np.append(coo_v, np.empty(max_nnz))
+                        max_nnz *= 2
+                    coo_r[nnz] = dof[i]
+                    coo_c[nnz] = dof[j]
+                    coo_v[nnz] = S_e[i, j]
+                    nnz += 1
+
+    return M_lumped, coo_r[:nnz], coo_c[:nnz], coo_v[:nnz]
+
+
+if NUMBA_AVAILABLE:
+    @njit(cache=True, parallel=True)
+    def _assemble_elements_numba(all_nodes, all_conn, N_all, dN_all, wts,
+                                  N_dof):
+        """Numba-JIT element assembly with parallel element loop."""
+        N_el = all_conn.shape[0]
+        n_q = wts.shape[0]
+
+        # Per-element results (will scatter afterward)
+        M_elem = np.zeros((N_el, 10))    # lumped mass per element
+        S_elem = np.zeros((N_el, 10, 10)) # stiffness per element
+
+        for e in prange(N_el):
+            dof = all_conn[e]
+            coords = all_nodes[dof]  # (10, 3)
+
+            M_diag_e = np.zeros(10)
+            total_mass = 0.0
+
+            for q in range(n_q):
+                # Jacobian
+                J = np.zeros((3, 3))
+                for a in range(3):
+                    for b in range(3):
+                        for k in range(10):
+                            J[a, b] += dN_all[q, a, k] * coords[k, b]
+
+                detJ = (J[0,0]*(J[1,1]*J[2,2]-J[1,2]*J[2,1])
+                       -J[0,1]*(J[1,0]*J[2,2]-J[1,2]*J[2,0])
+                       +J[0,2]*(J[1,0]*J[2,1]-J[1,1]*J[2,0]))
+                abs_detJ = abs(detJ)
+                w = wts[q] * abs_detJ
+
+                # Inverse Jacobian
+                Ji = np.zeros((3, 3))
+                Ji[0,0] = (J[1,1]*J[2,2]-J[1,2]*J[2,1])/detJ
+                Ji[0,1] = (J[0,2]*J[2,1]-J[0,1]*J[2,2])/detJ
+                Ji[0,2] = (J[0,1]*J[1,2]-J[0,2]*J[1,1])/detJ
+                Ji[1,0] = (J[1,2]*J[2,0]-J[1,0]*J[2,2])/detJ
+                Ji[1,1] = (J[0,0]*J[2,2]-J[0,2]*J[2,0])/detJ
+                Ji[1,2] = (J[0,2]*J[1,0]-J[0,0]*J[1,2])/detJ
+                Ji[2,0] = (J[1,0]*J[2,1]-J[1,1]*J[2,0])/detJ
+                Ji[2,1] = (J[0,1]*J[2,0]-J[0,0]*J[2,1])/detJ
+                Ji[2,2] = (J[0,0]*J[1,1]-J[0,1]*J[1,0])/detJ
+
+                # Physical gradients: dN_phys = Ji @ dN_ref
+                dN_phys = np.zeros((3, 10))
+                for a in range(3):
+                    for k in range(10):
+                        for b in range(3):
+                            dN_phys[a, k] += Ji[a, b] * dN_all[q, b, k]
+
+                # Mass diagonal (consistent)
+                for i in range(10):
+                    M_diag_e[i] += w * N_all[q, i] * N_all[q, i]
+                    total_mass += w * N_all[q, i]
+
+                # Stiffness (symmetric — compute upper triangle)
+                for i in range(10):
+                    for j in range(i, 10):
+                        val = w * (dN_phys[0,i]*dN_phys[0,j]
+                                 + dN_phys[1,i]*dN_phys[1,j]
+                                 + dN_phys[2,i]*dN_phys[2,j])
+                        S_elem[e, i, j] += val
+                        if i != j:
+                            S_elem[e, j, i] += val
+
+            # HRZ lumping
+            diag_sum = 0.0
+            for i in range(10):
+                diag_sum += M_diag_e[i]
+            if diag_sum > 0:
+                scale = total_mass / diag_sum
+                for i in range(10):
+                    M_elem[e, i] = M_diag_e[i] * scale
+
+        return M_elem, S_elem
+
+
 def assemble_tet_3d_operators(mesh):
     """
     Element-by-element assembly for P=2 tetrahedral meshes.
+
+    Uses Numba JIT with parallel element loop when available,
+    falls back to pure Python otherwise.
 
     Returns dict compatible with all FOM/ROM solvers:
         M_diag, M_inv, S, B_total
     """
     N = mesh.N_dof
     N_el = mesh.N_el
-    n_loc = 10  # P=2 tet
 
-    # Quadrature — use degree 5 (15-point) for both mass and stiffness.
-    # Degree 2 is exact for the integrand on affine tets, but P=2
-    # isoparametric tets have non-constant Jacobians that need higher
-    # quadrature to resolve.
     vol_pts, vol_wts = tet_quadrature(5)
-    stiff_pts, stiff_wts = vol_pts, vol_wts  # same rule
-    n_qv = len(vol_wts)
-    n_qs = len(stiff_wts)
+    N_all, dN_all = _shape_and_grad_at_quad_pts(vol_pts)
 
-    print(f"    Tet assembly: N={N}, {N_el} elements...",
+    backend = "numba (parallel)" if NUMBA_AVAILABLE else "python"
+    print(f"    Tet assembly [{backend}]: N={N}, {N_el} elements...",
           end='', flush=True)
 
-    M_diag = np.zeros(N)
-    s_r, s_c, s_v = [], [], []
+    if NUMBA_AVAILABLE:
+        all_nodes = np.ascontiguousarray(mesh.nodes)
+        all_conn = np.ascontiguousarray(mesh.elem_conn)
 
-    for e in range(N_el):
-        dof = mesh.elem_conn[e]  # (10,)
-        coords = mesh.nodes[dof]  # (10, 3)
+        M_elem, S_elem = _assemble_elements_numba(
+            all_nodes, all_conn, N_all, dN_all, vol_wts, N)
 
-        # --- Consistent mass (degree-4 quadrature), then row-sum lump ---
-        M_e = np.zeros((n_loc, n_loc))
-        for q in range(n_qv):
-            r, s, t = vol_pts[q]
-            N_q = tet_shape_p2(r, s, t)          # (10,)
-            dN = tet_shape_grad_p2(r, s, t)       # (3, 10)
-            J = dN @ coords                        # (3, 3)
-            detJ = np.linalg.det(J)
-            M_e += vol_wts[q] * abs(detJ) * np.outer(N_q, N_q)
+        # Scatter mass
+        M_diag = np.zeros(N)
+        for e in range(N_el):
+            dof = all_conn[e]
+            for i in range(10):
+                M_diag[dof[i]] += M_elem[e, i]
 
-        # HRZ lumping (Hinton-Rock-Zienkiewicz): scale the diagonal of
-        # the consistent mass to preserve total element mass.
-        # This avoids the negative entries that row-sum lumping produces
-        # for P=2 tets.
-        diag_M = np.diag(M_e)
-        total_mass = M_e.sum()  # = integral of 1 over element = |det J| * V_ref
-        diag_sum = diag_M.sum()
-        if diag_sum > 0:
-            scale = total_mass / diag_sum
-            for i in range(n_loc):
-                M_diag[dof[i]] += diag_M[i] * scale
-        else:
-            # Fallback to row-sum
-            for i in range(n_loc):
-                M_diag[dof[i]] += M_e[i, :].sum()
+        # Scatter stiffness to COO — preallocated, no Python append loop
+        print(" scatter...", end='', flush=True)
+        # Each element contributes up to 100 nonzeros (10x10)
+        coo_r = np.empty(N_el * 100, dtype=np.int64)
+        coo_c = np.empty(N_el * 100, dtype=np.int64)
+        coo_v = np.empty(N_el * 100)
+        nnz = 0
+        for e in range(N_el):
+            dof = all_conn[e]
+            Se = S_elem[e]
+            for i in range(10):
+                gi = dof[i]
+                for j in range(10):
+                    v = Se[i, j]
+                    if abs(v) > 1e-30:
+                        coo_r[nnz] = gi
+                        coo_c[nnz] = dof[j]
+                        coo_v[nnz] = v
+                        nnz += 1
 
-        # --- Stiffness (degree-2 quadrature) ---
-        S_e = np.zeros((n_loc, n_loc))
-        for q in range(n_qs):
-            r, s, t = stiff_pts[q]
-            dN = tet_shape_grad_p2(r, s, t)       # (3, 10)
-            J = dN @ coords                        # (3, 3)
-            detJ = np.linalg.det(J)
-            Jinv = np.linalg.inv(J)                # (3, 3)
-            dN_phys = Jinv @ dN                    # (3, 10)
-            S_e += stiff_wts[q] * abs(detJ) * (dN_phys.T @ dN_phys)
+        S = sparse.coo_matrix((coo_v[:nnz], (coo_r[:nnz], coo_c[:nnz])),
+                              shape=(N, N)).tocsr()
+    else:
+        M_diag, coo_r, coo_c, coo_v = _assemble_elements_python(
+            mesh.nodes, mesh.elem_conn, N_all, dN_all, vol_wts, N)
+        S = sparse.coo_matrix((coo_v, (coo_r, coo_c)),
+                              shape=(N, N)).tocsr()
 
-        # Scatter to global COO
-        for i in range(n_loc):
-            for j in range(n_loc):
-                v = S_e[i, j]
-                if abs(v) > 1e-30:
-                    s_r.append(dof[i])
-                    s_c.append(dof[j])
-                    s_v.append(v)
-
-        if (e + 1) % max(1, N_el // 5) == 0:
-            print(f" {e+1}/{N_el}", end='', flush=True)
-
-    print(" assembling...", end='', flush=True)
-    S = sparse.coo_matrix((s_v, (s_r, s_c)), shape=(N, N)).tocsr()
-
-    # --- Boundary mass ---
     print(" boundary...", end='', flush=True)
     B_diag = _assemble_boundary_mass_tet(mesh)
     B_total = sparse.diags(B_diag)
