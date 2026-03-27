@@ -721,7 +721,7 @@ def main():
     print(f"\n  Total time: {elapsed:.1f}s")
     print(f"  Plots saved to: {OUT_DIR}")
 
-    # write text report
+    # write text report (legacy)
     report_path = os.path.join(OUT_DIR, 'validation_report.txt')
     with open(report_path, 'w') as f:
         f.write("Room Acoustics 2D Validation Report\n")
@@ -740,6 +740,33 @@ def main():
                 f.write(f"Test 3 (LR d={d}): eps={results['test3'][d]['eps']:.6e}\n")
         f.write(f"\nTotal time: {elapsed:.1f}s\n")
     print(f"  Report: {report_path}")
+
+    # structured JSON report
+    from room_acoustics.results_io import save_result
+    fi_results = {}
+    for Z in [600, 16000]:
+        if Z in results.get('test2', {}):
+            fi_results[str(Z)] = {'eps': results['test2'][Z]['eps']}
+    lr_results = {}
+    for d in [0.05, 0.2]:
+        if d in results.get('test3', {}):
+            lr_results[str(d)] = {'eps': results['test3'][d]['eps']}
+
+    save_result('validation_2d_summary', {
+        'mesh': {'Nex': NEX, 'Ney': NEY, 'P': P_ORDER,
+                 'Lx': LX, 'Ly': LY, 'dt': DT, 'CFL': CFL,
+                 'N_dof': (NEX*P_ORDER+1)*(NEY*P_ORDER+1)},
+        'test1_pr_fom': {
+            'eps_ana_pphi': r1['eps_ana_pphi'],
+            'eps_ana_pv': r1['eps_ana_pv'],
+            'eps_formulation': r1['eps_form'],
+            'speedup_pphi_vs_pv': r1['speedup'],
+        },
+        'test2_fi_fom': fi_results,
+        'test3_lr_fom': lr_results,
+        'test9_large_speedup': results.get('test9', {}),
+        'elapsed_seconds': elapsed,
+    }, suite='2d_validation')
 
 
 if __name__ == '__main__':

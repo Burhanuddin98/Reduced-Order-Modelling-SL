@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "name": "unstruct3d_test1_cross",
+    "suite": "3d_unstructured",
+    "timestamp": "2026-03-27T15:51:14.955656+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "domain": {
+      "Lx": 1.0,
+      "Ly": 1.0,
+      "Lz": 1.0,
+      "type": "box"
+    },
+    "P": 4,
+    "N_elements_per_dir": 2,
+    "N_dof_structured": 729,
+    "N_dof_unstructured": 729,
+    "ir_max_error": 1.2281842209915794e-15,
+    "ir_relative_error": 1.1656924884405028e-14,
+    "ir_peak": 0.10536091063215822,
+    "dt": 1e-05,
+    "T": 0.005
+  }
+}

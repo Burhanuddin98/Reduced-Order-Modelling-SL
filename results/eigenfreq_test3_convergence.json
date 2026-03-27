@@ -1,0 +1,61 @@
+{
+  "metadata": {
+    "name": "eigenfreq_test3_convergence",
+    "suite": "eigenfrequency",
+    "timestamp": "2026-03-27T15:50:53.650660+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "domain": {
+      "type": "L-shape",
+      "Lx": 4.0,
+      "Ly": 3.0,
+      "notch_x": 2.0,
+      "notch_y": 1.5
+    },
+    "P": 4,
+    "T": 0.02,
+    "source": {
+      "x": 1.0,
+      "y": 1.0,
+      "sigma": 0.3
+    },
+    "receiver": {
+      "x": 3.0,
+      "y": 0.5
+    },
+    "meshes": [
+      {
+        "h": 0.5,
+        "N_dof": 813,
+        "dt": 1.367e-05
+      },
+      {
+        "h": 0.3,
+        "N_dof": 2185,
+        "dt": 8.2e-06
+      },
+      {
+        "h": 0.2,
+        "N_dof": 3985,
+        "dt": 5.47e-06
+      },
+      {
+        "h": 0.12,
+        "N_dof": 12025,
+        "dt": 3.28e-06
+      }
+    ],
+    "reference_N_dof": 12025,
+    "relative_errors_vs_finest": [
+      0.10084828544118363,
+      0.04926529264492783,
+      0.052462144574924346
+    ],
+    "h_values_coarse": [
+      0.5,
+      0.3,
+      0.2
+    ]
+  }
+}

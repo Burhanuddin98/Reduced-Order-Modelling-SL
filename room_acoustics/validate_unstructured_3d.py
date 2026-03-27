@@ -34,6 +34,7 @@ from room_acoustics.solvers import (
     fom_pphi_3d_gpu, rom_pphi_3d, build_psd_basis,
     build_modified_psd_basis, C_AIR, RHO_AIR,
 )
+from room_acoustics.results_io import save_result
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'results')
@@ -101,6 +102,17 @@ def test1_box_cross():
     ax2.set(xlabel='Time [ms]', ylabel='Error [Pa]')
     ax2.grid(True, alpha=0.3)
     savefig('unstruct3d_test1_cross.png')
+
+    save_result('unstruct3d_test1_cross', {
+        'domain': {'Lx': Lx, 'Ly': Ly, 'Lz': Lz, 'type': 'box'},
+        'P': P, 'N_elements_per_dir': Ne,
+        'N_dof_structured': mesh_s.N_dof,
+        'N_dof_unstructured': mesh_u.N_dof,
+        'ir_max_error': err,
+        'ir_relative_error': err / peak,
+        'ir_peak': peak,
+        'dt': dt, 'T': T,
+    }, suite='3d_unstructured')
 
     return dict(error=err, relative=err / peak)
 
@@ -191,6 +203,20 @@ def test2_lshape_3d_fom():
     plt.tight_layout()
     savefig('unstruct3d_test2_lshape_fom.png')
 
+    save_result('unstruct3d_test2_lshape_fom', {
+        'domain': {'type': 'L-shape extruded', 'Lx': 6.0, 'Ly': 4.0,
+                   'notch_x': 3.0, 'notch_y': 2.0, 'Lz': Lz,
+                   'n_layers': n_layers},
+        'mesh': {'N_dof': mesh.N_dof, 'N_el': mesh.N_el, 'P': P, 'h': h},
+        'volume': {'computed': vol, 'expected': 45.0},
+        'surface': {'computed': surf, 'expected': 86.0},
+        'stiffness_asymmetry': float(abs(ops['S'] - ops['S'].T).max()),
+        'pr_energy_drift': drift,
+        'fi_energy_ratio': float(E_fi[-1] / E_fi[0]),
+        'dt': dt, 'T': T,
+        'source': src,
+    }, suite='3d_unstructured')
+
     return dict(mesh=mesh, ops=ops, res_pr=res_pr, src=src,
                 rec_idx=rec_idx, dt=dt, T=T)
 
@@ -267,6 +293,15 @@ def test3_lshape_3d_rom(data):
 
     plt.tight_layout()
     savefig('unstruct3d_test3_lshape_rom.png')
+
+    save_result('unstruct3d_test3_lshape_rom', {
+        'N_dof': mesh.N_dof,
+        'N_el': mesh.N_el,
+        'Nrb_auto': Nrb_auto,
+        'fom_time_s': t_fom,
+        'sweep': [{'Nrb': nrb, 'speedup': sp, 'error_Linf': err}
+                  for nrb, sp, err in zip(nrb_list, speedups, errors)],
+    }, suite='3d_unstructured')
 
 
 # ==================================================================

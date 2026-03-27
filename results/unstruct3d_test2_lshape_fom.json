@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "name": "unstruct3d_test2_lshape_fom",
+    "suite": "3d_unstructured",
+    "timestamp": "2026-03-27T15:51:41.006947+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "domain": {
+      "type": "L-shape extruded",
+      "Lx": 6.0,
+      "Ly": 4.0,
+      "notch_x": 3.0,
+      "notch_y": 2.0,
+      "Lz": 2.5,
+      "n_layers": 2
+    },
+    "mesh": {
+      "N_dof": 11097,
+      "N_el": 144,
+      "P": 4,
+      "h": 0.5
+    },
+    "volume": {
+      "computed": 45.00000000000001,
+      "expected": 45.0
+    },
+    "surface": {
+      "computed": 86.00000000000001,
+      "expected": 86.0
+    },
+    "stiffness_asymmetry": 2.220446049250313e-16,
+    "pr_energy_drift": 6.273789764461038e-08,
+    "fi_energy_ratio": 0.0017514365070322498,
+    "dt": 1.367e-05,
+    "T": 0.04,
+    "source": [
+      1.5,
+      1.5,
+      1.25
+    ]
+  }
+}

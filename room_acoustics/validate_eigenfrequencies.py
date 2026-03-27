@@ -27,6 +27,7 @@ from room_acoustics.unstructured_sem import (
 )
 from room_acoustics.sem import RectMesh2D, assemble_2d_operators
 from room_acoustics.solvers import C_AIR
+from room_acoustics.results_io import save_result
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'results')
@@ -136,6 +137,19 @@ def test1_rectangular():
 
     plt.tight_layout()
     savefig('eigenfreq_test1_rect.png')
+
+    save_result('eigenfreq_test1_rect', {
+        'domain': {'Lx': Lx, 'Ly': Ly, 'type': 'rectangle'},
+        'mesh': {'Nex': Nex, 'Ney': Ney, 'P': P,
+                 'N_struct': mesh_s.N_dof, 'N_unstruct': mesh_u.N_dof},
+        'analytical_eigenvalues': ana_eigs,
+        'numerical_structured': num_eigs_s,
+        'numerical_unstructured': num_eigs_u,
+        'relative_errors_structured': [0.0] + err_s,
+        'relative_errors_unstructured': [0.0] + err_u,
+        'frequencies_Hz': [np.sqrt(max(a, 0)) * C_AIR / (2*np.pi)
+                           for a in ana_eigs],
+    }, suite='eigenfrequency')
 
     return dict(ana=ana_eigs, num_s=num_eigs_s, num_u=num_eigs_u)
 
@@ -286,6 +300,23 @@ def test2_lshape():
     plt.tight_layout()
     savefig('eigenfreq_test2_lshape.png')
 
+    save_result('eigenfreq_test2_lshape', {
+        'domain': {'type': 'L-shape', 'vertices': '(0,0),(2,0),(2,1),(1,1),(1,2),(0,2)',
+                   'area': 3.0},
+        'reference_source': 'Dauge Maxwell benchmark (Neumann eigenvalues)',
+        'reference_url': 'https://perso.univ-rennes1.fr/monique.dauge/benchmax.html',
+        'reference_eigenvalues': ref_eigenvalues,
+        'reference_labels': ref_labels,
+        'P': P,
+        'convergence_study': [
+            {'h': r['h'], 'N_dof': r['N'], 'n_elements': r['n_el'],
+             'area': r['area'],
+             'computed_eigenvalues': r['eigs'][:len(ref_eigenvalues)],
+             'relative_errors': r['errors']}
+            for r in results
+        ],
+    }, suite='eigenfrequency')
+
     return results
 
 
@@ -382,6 +413,19 @@ def test3_convergence():
 
     plt.tight_layout()
     savefig('eigenfreq_test3_convergence.png')
+
+    save_result('eigenfreq_test3_convergence', {
+        'domain': {'type': 'L-shape', 'Lx': 4.0, 'Ly': 3.0,
+                   'notch_x': 2.0, 'notch_y': 1.5},
+        'P': P, 'T': T,
+        'source': {'x': src_x, 'y': src_y, 'sigma': sigma},
+        'receiver': {'x': 3.0, 'y': 0.5},
+        'meshes': [{'h': h, 'N_dof': N, 'dt': dt}
+                   for _, _, N, h, dt in irs],
+        'reference_N_dof': N_ref,
+        'relative_errors_vs_finest': errors,
+        'h_values_coarse': h_coarse,
+    }, suite='eigenfrequency')
 
 
 # ==================================================================
