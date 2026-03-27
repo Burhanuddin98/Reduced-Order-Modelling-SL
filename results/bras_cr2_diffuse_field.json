@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "name": "bras_cr2_diffuse_field",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-27T22:36:30.525459+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "method": "diffuse-field impedance (alpha_random_to_Z)",
+    "mesh": {
+      "type": "P4 hex",
+      "N_dof": 23001
+    },
+    "measured": {
+      "T30": 1.663,
+      "EDT": 1.166,
+      "C80": 2.6,
+      "D50": 0.489
+    },
+    "simulated": {
+      "T30_s": 1.0531552803182593,
+      "T30_R2": 0.8724459044951649,
+      "T20_s": 1.0878422897967752,
+      "T20_R2": 0.900952382117318,
+      "EDT_s": 2.1681828886030345,
+      "EDT_R2": 0.9922886761458205,
+      "C80_dB": -4.024732471938371,
+      "D50": 0.1442591956957819,
+      "TS_ms": 173.16819812620065
+    },
+    "error_T30_pct": 36.67136017328567,
+    "Z_ratio_diffuse_vs_normal": 1.93
+  }
+}

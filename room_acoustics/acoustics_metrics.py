@@ -206,14 +206,71 @@ def impedance_to_alpha(Z):
 
     Uses the normal-incidence formula: alpha = 1 - |R|^2
     where R = (Z - rho*c) / (Z + rho*c).
-
-    For diffuse-field (random incidence), multiply by ~0.9-1.0
-    (Paris formula), but normal incidence is the standard comparison
-    for wave-based solvers.
     """
-    rho_c = 1.2 * 343.0  # = 411.6
+    rho_c = 1.2 * 343.0
     R = (Z - rho_c) / (Z + rho_c)
     return 1.0 - R ** 2
+
+
+def diffuse_alpha_for_Z(Z, n_angles=200):
+    """Compute random-incidence (diffuse-field) absorption for impedance Z.
+
+    Integrates the angle-dependent absorption over all incidence angles
+    weighted by sin(2*theta) (Lambert's cosine law for diffuse field):
+
+        alpha_d = integral_0^{pi/2} alpha(theta) * sin(2*theta) d_theta
+
+    where alpha(theta) = 1 - |R(theta)|^2 and
+    R(theta) = (Z*cos(theta) - rho*c) / (Z*cos(theta) + rho*c).
+    """
+    rho_c = 1.2 * 343.0
+    theta = np.linspace(0, np.pi/2, n_angles + 1)[:-1]  # exclude pi/2
+    dtheta = theta[1] - theta[0]
+
+    cos_t = np.cos(theta)
+    Z_eff = Z * cos_t  # effective impedance at angle theta
+    R = (Z_eff - rho_c) / (Z_eff + rho_c)
+    alpha_t = 1.0 - R**2
+    weight = np.sin(2 * theta)
+
+    return np.sum(alpha_t * weight * dtheta)
+
+
+def alpha_random_to_Z(alpha_random, tol=1e-6, max_iter=100):
+    """Convert random-incidence absorption coefficient to impedance Z.
+
+    Inverts the diffuse-field alpha-Z relationship numerically.
+    Given alpha_random (what's measured in a room / given in databases),
+    find the impedance Z such that diffuse_alpha_for_Z(Z) = alpha_random.
+
+    This is the correct conversion for room acoustics — NOT the
+    normal-incidence formula which gives Z that's too low (too absorptive).
+    """
+    rho_c = 1.2 * 343.0
+
+    if alpha_random <= 0:
+        return 1e15
+    if alpha_random >= 1:
+        return rho_c
+
+    # Bisection search: Z is monotonically related to alpha
+    # Higher Z = lower alpha (more reflective)
+    Z_lo = rho_c       # alpha = 1.0 (perfect absorber)
+    Z_hi = 1e8          # alpha ~ 0
+
+    for _ in range(max_iter):
+        Z_mid = np.sqrt(Z_lo * Z_hi)  # geometric mean for log-scale search
+        alpha_mid = diffuse_alpha_for_Z(Z_mid)
+
+        if abs(alpha_mid - alpha_random) < tol:
+            return Z_mid
+
+        if alpha_mid > alpha_random:
+            Z_lo = Z_mid  # need higher Z (less absorption)
+        else:
+            Z_hi = Z_mid  # need lower Z (more absorption)
+
+    return Z_mid
 
 
 def all_metrics(ir, dt):
