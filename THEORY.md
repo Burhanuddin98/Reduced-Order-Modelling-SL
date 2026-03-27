@@ -1,414 +1,350 @@
-# Room Acoustics with Model Order Reduction — Theory Guide
+# Room Acoustics Simulation Engine — Complete Theory Guide
 
-## 1. The Physical Problem
-
-Sound in a room obeys the **acoustic wave equation**. When a sound source fires (a clap, a speaker impulse), pressure waves radiate outward, bounce off walls, and eventually decay. Simulating this process gives us an **impulse response (IR)** — the DNA of a room's acoustics. Convolve any audio with the IR and you hear what that audio sounds like *in that room*.
-
-The challenge: a full numerical simulation (the **Full Order Model**, FOM) solves for pressure at thousands or millions of spatial points, thousands of times per second. This is accurate but slow. **Model Order Reduction (ROM)** compresses the problem from thousands of unknowns down to tens, achieving 10-100x speedup while preserving accuracy.
+This document explains everything this codebase does, from the physics to the code, in plain language. You can hand this to Claude or any AI assistant and they will understand the full system.
 
 ---
 
-## 2. Governing Equations
+## 1. What This Project Does
 
-### 2.1 The Linearized Acoustic Equations
+You clap your hands in a room. Sound waves travel outward, bounce off walls, and eventually die out. The pattern of those reflections — how loud, how fast they decay, which frequencies survive — is called the room's **impulse response (IR)**.
 
-Starting from conservation of mass and momentum for small perturbations in air:
+This project simulates that process numerically. You define a room shape, choose wall materials, place a sound source, and the code computes the impulse response at any listener position. The result is a pressure-vs-time signal that captures everything about how that room sounds.
+
+The core innovation is **Model Order Reduction (ROM)**. A full simulation solves for pressure at tens of thousands of spatial points. The ROM compresses this to ~20-60 variables, giving 100-500x speedup while keeping the answer nearly identical.
+
+---
+
+## 2. The Physics: How Sound Travels in a Room
+
+### 2.1 The Wave Equation
+
+Sound is small pressure fluctuations in air. Two physical laws govern it:
+
+- **Conservation of mass**: pressure changes cause air to move
+- **Conservation of momentum**: pressure gradients push air around
+
+Written as equations:
 
 ```
-∂p/∂t + ρc² ∇·v = 0          (mass conservation)
-∂v/∂t + (1/ρ) ∇p = 0          (momentum conservation)
+dp/dt = -rho * c^2 * div(v)       (pressure changes when air compresses/expands)
+dv/dt = -(1/rho) * grad(p)        (air accelerates toward lower pressure)
 ```
 
 where:
-- **p(x,t)** — acoustic pressure [Pa]
-- **v(x,t)** — particle velocity vector [m/s]
-- **ρ = 1.2 kg/m³** — air density
-- **c = 343 m/s** — speed of sound
+- `p(x,t)` = pressure at position x, time t [Pascals]
+- `v(x,t)` = air velocity [m/s]
+- `rho` = 1.2 kg/m^3 (air density)
+- `c` = 343 m/s (speed of sound)
 
-This is the **pressure-velocity (p-v)** formulation, also called the Linearized Euler Equations.
+This is the **pressure-velocity (p-v)** formulation.
 
-### 2.2 The Pressure-Potential (p-Φ) Formulation
+### 2.2 Why We Use the Pressure-Potential (p-Phi) Formulation
 
-Define a **velocity potential** Φ such that v = −(1/ρ) ∇Φ. The equations become:
-
-```
-∂p/∂t  = ρc² M⁻¹ S Φ  +  boundary terms
-∂Φ/∂t  = −(1/ρ) p
-```
-
-where S is the stiffness (Laplacian) operator and M is the mass operator.
-
-**Why bother?** This formulation has **Hamiltonian structure** — the total acoustic energy
+Instead of tracking velocity directly, define a "velocity potential" Phi where `v = -(1/rho) * grad(Phi)`. The equations become:
 
 ```
-H = (ρ/2) ∫|∇Φ|² dx  +  (1/2ρc²) ∫ p² dx
-      ╰─ kinetic ─╯       ╰─ potential ─╯
+dp/dt   = rho * c^2 * M^{-1} * S * Phi    (+ boundary terms)
+dPhi/dt = -(1/rho) * p
 ```
 
-is exactly conserved for rigid walls. This structure is critical for building stable reduced models (Section 6).
+This looks more abstract but has a critical property: **energy conservation is built into the math**. The total acoustic energy:
+
+```
+E = (kinetic) + (potential) = (rho/2) * |grad(Phi)|^2 + (1/(2*rho*c^2)) * p^2
+```
+
+is exactly constant when walls are rigid. This matters because when we compress the model (ROM), formulations that conserve energy stay stable forever. Formulations that don't can blow up after a few milliseconds.
+
+### 2.3 What Happens at Walls
+
+Three types of wall conditions, from simplest to most realistic:
+
+**Perfectly Reflecting (PR)** — rigid walls, no sound absorbed. Sound bounces forever. Energy is constant. This is the "bathroom tile" extreme.
+
+**Frequency-Independent Impedance (FI)** — walls absorb a fixed fraction of energy at all frequencies. Controlled by impedance Z (units: N*s/m^3). Low Z = more absorption (carpet), high Z = less absorption (concrete). The boundary condition is `p = Z * v_normal`.
+
+**Locally Reacting (LR)** — absorption depends on frequency. Real materials do this: a thick carpet absorbs high frequencies much more than low frequencies. Modeled using the Miki empirical formula, which gives complex impedance Z(f) as a function of material properties (flow resistivity sigma, thickness d). Since Z(f) is frequency-dependent but we simulate in the time domain, we use **Auxiliary Differential Equations (ADE)** — a trick that converts the frequency-domain impedance into a set of coupled ODEs that march in time alongside the wave equation.
 
 ---
 
-## 3. Spatial Discretization: Spectral Element Method (SEM)
+## 3. Spatial Discretization: Turning Continuous Equations into Computable Ones
 
-### 3.1 Why SEM?
+### 3.1 The Idea
 
-The Spectral Element Method combines the geometric flexibility of finite elements with the exponential convergence of spectral methods. For room acoustics, this means:
-- **High accuracy per DOF** — fewer unknowns needed compared to standard FEM or FDTD
-- **Diagonal mass matrix** — via GLL quadrature, enabling explicit time stepping without solving linear systems
-- **Tensor-product structure** — Kronecker products make 2D/3D assembly from 1D building blocks
+The pressure field p(x,y,z,t) is a continuous function — it has a value at every point in space. Computers can't store infinity. So we sample the field at a finite set of points (nodes) and track the pressure at those nodes over time.
 
-### 3.2 GLL Quadrature
+The room is divided into small elements (like tiles covering a floor). Within each element, the pressure is represented as a polynomial. The nodes are the points where we know the pressure exactly; between nodes, we interpolate.
 
-The foundation is **Gauss-Lobatto-Legendre (GLL)** quadrature on the reference interval [−1, 1].
+### 3.2 Two Types of Elements
 
-For polynomial order P, we get P+1 nodes {ξ₀, ξ₁, ..., ξ_P} and weights {w₀, w₁, ..., w_P}. The nodes are:
-- ξ₀ = −1 and ξ_P = +1 (endpoints always included — this is the "Lobatto" part)
-- Interior nodes = roots of P'_N(ξ), the derivative of the Legendre polynomial
+**Hexahedral (hex) elements** — 3D bricks. Each element is a deformed cube with 8 corners. Inside, we place (P+1)^3 nodes in a regular grid pattern using Gauss-Lobatto-Legendre (GLL) points. For P=4, that's 125 nodes per element. The huge advantage: the mass matrix is diagonal (each node has its own mass, no coupling), so time-stepping is cheap — just divide by a number, no linear system to solve.
 
-The weights satisfy: ∫₋₁¹ f(ξ) dξ ≈ Σ wᵢ f(ξᵢ), exact for polynomials up to degree 2P−1.
+**Tetrahedral (tet) elements** — 3D triangular pyramids with 4 corners. For P=2 (quadratic), each tet has 10 nodes (4 vertices + 6 edge midpoints). Tets can mesh any geometry — Gmsh generates them automatically for arbitrary shapes. The disadvantage: the mass matrix isn't naturally diagonal, so we use "lumping" (an approximation that makes it diagonal at the cost of some accuracy).
 
-**Key property:** Because GLL nodes include endpoints, neighboring elements share boundary nodes automatically — no separate "gluing" step needed.
+### 3.3 The Operators
 
-### 3.3 1-D Element Operators
+After discretization, the continuous equations become matrix equations. The key matrices:
 
-On each element of physical width h, we build three operators:
+- **Mass matrix M** — diagonal array, one weight per node. Represents "how much space does this node control." For hex elements, this is exact (GLL quadrature). For tet elements, it's approximate (HRZ lumping).
 
-**Mass matrix M** (diagonal, from GLL quadrature):
-```
-M[i] = (h/2) wᵢ
-```
-This is the "lumped" mass — diagonal because GLL quadrature uses the same points as the basis functions. This is what makes explicit time stepping cheap.
+- **Stiffness matrix S** — sparse matrix. Entry S[i,j] represents how much pressure at node j contributes to the Laplacian at node i. This encodes the room geometry — the shape of the room lives inside S. For a 25,000-DOF mesh, S might have 500,000 nonzero entries out of 625 million possible.
 
-**Stiffness matrix K** (from the Laplacian ∇²):
-```
-K = D^T W D    where D[i,j] = l'_j(ξᵢ)  (derivative of Lagrange basis)
-                      W = diag(w)
-```
-Scaled by the Jacobian: K_physical = (2/h) K_reference.
+- **Boundary mass matrix B** — diagonal, nonzero only at wall nodes. Represents the wall surface area associated with each boundary node. Used for absorbing boundary conditions.
 
-**Gradient matrix G** (maps potential to velocity):
-```
-G[i,j] = ∫ l'_j(ξ) lᵢ(ξ) dξ
-```
-Computed with **exact Gauss quadrature** (not GLL) to ensure the discrete identity S_x^T M⁻¹ S_x ≈ S holds. This is important: if the gradient isn't computed accurately, the p-v and p-Φ formulations disagree, and the Hamiltonian structure breaks.
+The solvers only need these three things: `M_diag`, `S`, `B_total`. They don't care whether the mesh is hex or tet, structured or unstructured. This is why we can swap mesh types without changing the solver code.
 
-### 3.4 2-D Assembly via Kronecker Products
+### 3.4 How Many Nodes Do You Need?
 
-For a rectangular domain [0,Lx] × [0,Ly] with Nex × Ney elements:
+Rule of thumb: you need about 6-10 nodes per shortest wavelength. At 500 Hz, wavelength = 343/500 = 0.686 m. With P=4 hex elements, element size h ~ 0.3 m works. With P=2 tets, you need h ~ 0.1-0.15 m (smaller because lower polynomial order is less accurate per node).
 
-The 2-D mass is simply the outer product of 1-D masses:
-```
-M_2D = Mʸ ⊗ Mˣ     (diagonal — fast!)
-```
-
-The 2-D Laplacian stiffness decomposes as:
-```
-S = (Mʸ ⊗ Kˣ) + (Kʸ ⊗ Mˣ)
-```
-Read this as: "differentiate twice in x (with y mass weighting) plus differentiate twice in y (with x mass weighting)."
-
-The gradient operators:
-```
-Sₓ = Mʸ ⊗ Gˣ       (gradient in x)
-Sᵧ = Gʸ ⊗ Mˣ       (gradient in y)
-```
-
-### 3.5 3-D Assembly (Triple Kronecker)
-
-For a box [0,Lx] × [0,Ly] × [0,Lz]:
-```
-M_3D = M_z ⊗ M_y ⊗ M_x
-S    = (M_z ⊗ M_y ⊗ K_x) + (M_z ⊗ K_y ⊗ M_x) + (K_z ⊗ M_y ⊗ M_x)
-```
-
-The Kronecker structure means we never form the full N×N matrices explicitly in the assembly — we build them from small (P+1)×(P+1) blocks. For a mesh with N = 36,000 DOFs (the 3D test case), the stiffness matrix S has ~3.8M nonzeros stored as a sparse CSR matrix.
-
-### 3.6 Resolution Rule
-
-To resolve waves up to frequency f_max, we need roughly PPW (points per wavelength) nodes per shortest wavelength λ_min = c/f_max:
-
-```
-element size h ≈ (λ_min / PPW) × P
-```
-
-With P=4 and PPW=10: for f_max=700 Hz, h ≈ 0.196 m → about 21×11 elements for a 4×2 m room (N ≈ 3,700 DOFs). For f_max=1000 Hz in 3D: N ≈ 36,000.
+The number of DOFs scales as (room_volume / h^3). A 4x3x2 m room at h=0.2: N ~ 24,000 DOFs. A 20x15x4 m lecture hall at h=0.1: N ~ 1,200,000 DOFs.
 
 ---
 
-## 4. Boundary Conditions
+## 4. Time Integration: Stepping Forward in Time
 
-### 4.1 Perfectly Reflecting (PR) — Rigid Walls
+### 4.1 RK4
 
-The simplest case: v·n = 0 at walls (no normal velocity). No energy leaves the system. In the p-Φ formulation, this requires no explicit boundary term — it's the natural (Neumann) boundary condition.
-
-Energy is exactly conserved: H(t) = H(0) for all time.
-
-### 4.2 Frequency-Independent Impedance (FI)
-
-Real walls absorb some sound. The simplest absorption model relates pressure to normal velocity at the wall:
+We use the classical 4th-order Runge-Kutta method. Given the current state [p, Phi] at time t, compute the state at t + dt:
 
 ```
-p = Z · vₙ     at the boundary
+k1 = f(state)
+k2 = f(state + dt/2 * k1)
+k3 = f(state + dt/2 * k2)
+k4 = f(state + dt * k3)
+state_new = state + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
 ```
 
-where Z [N·s/m³] is the wall impedance. Low Z = more absorption, high Z = more reflection (Z → ∞ recovers rigid walls).
+Each `f()` evaluation requires one sparse matrix-vector product (S * Phi), which is the dominant cost.
 
-In the FOM, this adds a damping term:
-```
-∂p/∂t += −(ρc²/Z) M⁻¹ B p     (B = boundary mass matrix)
-```
+### 4.2 The CFL Condition
 
-Energy now decays monotonically: dH/dt ≤ 0.
-
-### 4.3 Locally Reacting, Frequency-Dependent (LR)
-
-Real materials have impedance that varies with frequency — a carpet absorbs high frequencies much more than low frequencies. The **Miki model** (1990) gives the surface impedance of a porous absorber backed by a rigid wall:
+The time step dt must be small enough for stability:
 
 ```
-Z_c = ρc [1 + 0.0699(f/σ)^{-0.632} − j·0.1071(f/σ)^{-0.618}]
-k_c = (2πf/c) [1 + 0.1093(f/σ)^{-0.618} − j·0.1597(f/σ)^{-0.683}]
-Z_s = −jZ_c / tan(k_c · d)
+dt <= CFL * h / (c * P^2)
 ```
 
-Parameters:
-- σ_mat — flow resistivity of the material [N·s/m⁴] (e.g., 10,000 for dense fiberglass)
-- d_mat — material thickness [m]
+CFL ~ 0.15 for RK4. For P=4 hex with h=0.19: dt ~ 1e-5 seconds. For P=2 tet with h=0.2: dt ~ 1.5e-5 seconds. A 40 ms simulation requires ~2,700 time steps.
 
-**The problem:** Z_s(f) is a complex function of frequency, but our time-domain solver works step-by-step in time. We can't just multiply by Z_s — that's a frequency-domain operation.
+### 4.3 The Propagator Matrix (ROM speedup trick)
 
-**The solution: Auxiliary Differential Equations (ADE)**
-
-We approximate the surface admittance Y_s(ω) = 1/Z_s(ω) as a sum of rational functions (poles):
+For a linear system dp/dt = A*p, the RK4 scheme is equivalent to:
 
 ```
-Y_s(jω) ≈ Y_∞ + Σₖ Aₖ / (λₖ + jω)
+state_{n+1} = P * state_n
 ```
 
-Each pole becomes an ODE (an "accumulator" variable φₖ at each boundary node):
+where P is the "propagator matrix":
+
 ```
-dφₖ/dt = −λₖ φₖ + p_boundary
+P = I + dt*A + (dt*A)^2/2 + (dt*A)^3/6 + (dt*A)^4/24
 ```
 
-The normal velocity at the wall is then:
-```
-vₙ = Y_∞ · p + Σₖ Aₖ · φₖ
-```
-
-This converts the frequency-dependent boundary into a set of coupled ODEs that march in time alongside the wave equation. The pole locations and residues {λₖ, Aₖ} are found by **vector fitting** (Gustavsen-Semlyen algorithm), which iteratively relocates poles to minimize the least-squares fit to Y_s(ω).
+This is just the Taylor expansion of the matrix exponential. For the ROM, A is tiny (e.g., 120x120 for Nrb=60), so P is precomputed once and each time step is a single small matrix-vector multiply. This is why the ROM is so fast.
 
 ---
 
-## 5. Time Integration: RK4
+## 5. Model Order Reduction (ROM)
 
-All solvers use the classical 4th-order Runge-Kutta method. For state vector **q** = [p, Φ] (or [p, u, v]):
+### 5.1 The Key Insight
+
+Run the full simulation once (the FOM). Collect "snapshots" — the pressure field at many time instants. These snapshots are vectors of length N (thousands of entries), but they don't span the full N-dimensional space. They lie on or near a low-dimensional subspace.
+
+Think of it like video compression: each frame of a video has millions of pixels, but most frames look similar. You can describe the video using a small set of "key frames" and their combinations. The ROM does the same thing with pressure fields.
+
+### 5.2 Building the Basis (Offline Phase)
+
+1. Run the FOM, save pressure snapshots at many time steps: p(t_1), p(t_2), ..., p(t_K)
+2. Stack them into a matrix (N rows x K columns)
+3. Compute the SVD (Singular Value Decomposition): Snapshot = U * Sigma * V^T
+4. The columns of U are the "basis vectors" — the dominant spatial patterns
+5. Keep only the first r columns (where r << N), corresponding to the largest singular values
+6. These r vectors form the reduced basis Psi (N x r matrix)
+
+The truncation criterion: keep enough modes to capture (1 - epsilon) of the total energy, where epsilon ~ 1e-8. Typically r = 20-100 modes suffice.
+
+### 5.3 Two Basis Types
+
+**POD** (Proper Orthogonal Decomposition) — standard approach, separate bases for p, u, v. Does not preserve energy conservation.
+
+**PSD** (Proper Symplectic Decomposition) — combines p and Phi snapshots, uses a single basis for both. Preserves the Hamiltonian (energy-conserving) structure. This is what we use for the p-Phi formulation.
+
+**Modified PSD** — also includes boundary pressure snapshots in the SVD. This enriches the basis with modes that capture how energy leaves through absorbing walls, improving ROM stability for FI and LR boundaries.
+
+**DC mode enrichment** — explicitly adds the constant-pressure mode (uniform pressure everywhere) to the basis. Without this, absorbing-wall ROMs can develop a DC offset that drifts because the basis can't represent it.
+
+### 5.4 Solving in the Reduced Space (Online Phase)
+
+Project the full operators onto the reduced basis:
 
 ```
-k₁ = f(qⁿ)
-k₂ = f(qⁿ + ½Δt k₁)
-k₃ = f(qⁿ + ½Δt k₂)
-k₄ = f(qⁿ + Δt k₃)
-qⁿ⁺¹ = qⁿ + (Δt/6)(k₁ + 2k₂ + 2k₃ + k₄)
+K1_r = Psi^T * (rho*c^2 * M^{-1} * S) * Psi     (r x r matrix)
+K3_r = Psi^T * (boundary_operator) * Psi           (r x r matrix, FI only)
 ```
 
-**CFL condition** (stability limit):
+Now instead of evolving N unknowns, evolve r unknowns:
+
 ```
-Δt ≤ CFL · h / (c · P²)
+d(a_p)/dt   = K1_r * a_Phi + K3_r * a_p
+d(a_Phi)/dt = -(1/rho) * a_p
 ```
 
-With CFL ≈ 0.15-0.2 for RK4 with SEM. Smaller P² in the denominator reflects the fact that higher-order elements have tighter stability constraints.
+where a_p and a_Phi are the r-dimensional coefficient vectors.
 
-Each RK4 step requires 4 evaluations of the right-hand side, each involving a sparse matrix-vector product (S·Φ or Sₓ·p). This is the dominant cost — and what we want the ROM to eliminate.
+Cost comparison per time step:
+- FOM: sparse matvec on N-dimensional vectors (N = 25,000 → ~500,000 operations)
+- ROM: dense matvec on 2r-dimensional vector (r = 40 → 6,400 operations)
+
+That's why the ROM is 100-500x faster.
+
+### 5.5 Eigenvalue Stabilization (Schur decomposition)
+
+The RK4 propagator P should have all eigenvalues inside or on the unit circle (|lambda| <= 1). Floating-point errors can push some slightly outside, causing exponential blow-up.
+
+**The fix**: decompose P using the Schur decomposition (P = Q * T * Q^H, where Q is unitary). The eigenvalues sit on the diagonal of T. Clip any |lambda| > 1 to exactly 1. Reconstruct P. Since Q is unitary (condition number = 1), this is numerically rock-solid — unlike the eigendecomposition approach (P = V * D * V^{-1}) where V can be ill-conditioned.
+
+For PR (conservative): force all |lambda| = 1 (energy conserved exactly).
+For FI (dissipative): clip |lambda| > 1 to 1 (energy can only decrease).
 
 ---
 
-## 6. Model Order Reduction (ROM)
+## 6. Mesh Generation: From Room Shape to Computable Mesh
 
-### 6.1 The Core Idea
+### 6.1 Structured Meshes (Rectangular Rooms Only)
 
-After running the FOM, we have **snapshots**: the pressure field p(x, tₖ) sampled at many time steps. These snapshots live in a high-dimensional space (N = thousands of DOFs) but typically lie on or near a much lower-dimensional manifold.
+For rectangular rooms, the mesh is a regular grid. Operators are assembled using Kronecker products of 1D operators — very fast, very accurate. This is the `RectMesh2D` / `BoxMesh3D` path.
 
-**ROM in one sentence:** Find a small basis {ψ₁, ..., ψᵣ} (r << N) that spans the snapshot data, then solve the wave equation projected onto that basis.
+### 6.2 Unstructured Quad/Hex Meshes (Arbitrary 2D Floor Plans)
 
-Instead of evolving N unknowns, we evolve r ≈ 10-100 unknowns:
-```
-p(x, t) ≈ Σᵢ aᵢ(t) ψᵢ(x)     →     p ≈ Ψ a
-```
+For non-rectangular rooms (L-shapes, T-shapes, rooms with columns), we use Gmsh to generate a quad mesh of the floor plan, then either:
+- Use it directly for 2D simulation (`UnstructuredQuadMesh2D`)
+- Extrude it vertically into hex elements for 3D simulation (`UnstructuredHexMesh3D`)
 
-The FOM system **q̇ = A q** becomes the ROM system **ȧ = Aᵣ a** where Aᵣ = Ψᵀ A Ψ is a tiny r×r matrix.
+The extrusion approach covers most real rooms — they're floor plans with a ceiling height. Assembly is element-by-element with isoparametric mapping (computing the Jacobian at each quadrature point to account for element distortion).
 
-### 6.2 Basis Construction: POD vs PSD
+### 6.3 Tetrahedral Meshes (Any 3D Geometry)
 
-**POD (Proper Orthogonal Decomposition)** — Standard approach for p-v:
-1. Collect snapshots into a matrix: columns = [p(t₁), p(t₂), ...]
-2. Compute SVD: snapshot matrix = U Σ Vᵀ
-3. Keep the first r columns of U (corresponding to largest singular values)
-4. Truncation criterion: retain enough modes to capture (1 − ε) of the total "energy" (sum of σ²)
+For truly arbitrary geometries, Gmsh generates tetrahedral meshes. P=2 (quadratic, 10-node tets) gives O(h^2) convergence. The mass matrix uses HRZ lumping (Hinton-Rock-Zienkiewicz) to stay diagonal and positive.
 
-Separate bases are built for p, u, and v. This works but **does not preserve Hamiltonian structure**.
-
-**PSD (Proper Symplectic Decomposition)** — For p-Φ:
-1. Combine p and Φ snapshots: columns = [p(t₁)...p(tₙ), Φ(t₁)...Φ(tₙ)]
-2. SVD of the combined matrix → single basis Ψ_H
-3. Use **the same basis** for both p and Φ (the "cotangent lift")
-
-This preserves the symplectic (Hamiltonian) structure: if the FOM conserves energy, so does the ROM. This is why p-Φ + PSD is preferred over p-v + POD for long-time stability.
-
-**Modified PSD (Boundary-Energy Enrichment)** — For absorbing walls:
-
-Standard PSD misses the boundary behavior because boundary pressure is a small fraction of the total field. The fix: include boundary pressure snapshots in the SVD:
-```
-combined = [p snapshots | Φ snapshots | p_boundary snapshots]
-```
-
-This enriches the basis with modes that capture how energy leaves through the walls, improving ROM stability for FI and LR boundaries.
-
-### 6.3 ROM Online Phase
-
-Once the basis Ψ is built, the ROM solve is cheap. The **reduced operators** are precomputed:
-
-```
-K₁ʳ = Ψᵀ (ρc² M⁻¹ S) Ψ          (r × r matrix)
-K₂  = −1/ρ                         (scalar)
-K₃ʳ = Ψᵀ (boundary operator) Ψ    (r × r, only for FI)
-```
-
-Then time-stepping is just r×r matrix-vector products instead of N×N sparse matvecs.
-
-**Cost comparison per time step:**
-- FOM: O(nnz) ≈ O(N · (2P+1)²) — sparse matvec
-- ROM: O(r²) — dense matvec on tiny system
-
-For N=36,000 and r=40: the ROM step is ~900x cheaper per step. After accounting for overhead (basis projection, operator construction), the total speedup is 10-100x.
-
-### 6.4 RK4 Propagator Matrix (3D ROM)
-
-For a **linear** ODE ȧ = Aᵣ a, the RK4 scheme reduces to:
-```
-aⁿ⁺¹ = P · aⁿ
-```
-
-where P is the **propagator matrix**:
-```
-P = I + ΔtA + (ΔtA)²/2 + (ΔtA)³/6 + (ΔtA)⁴/24
-```
-
-This is just the degree-4 Taylor expansion of the matrix exponential e^{ΔtA}.
-
-**Key advantage:** P is a 2r × 2r dense matrix computed once. Each time step is then a single matrix-vector multiply — no RK4 stages, no 4× overhead.
-
-### 6.5 Eigenvalue Stabilization
-
-The propagator P should have **spectral radius ≤ 1** (all eigenvalues inside or on the unit circle). If any |λᵢ| > 1, that mode grows exponentially and the simulation blows up.
-
-For PR (conservative): all |λᵢ| should equal exactly 1. In practice, floating-point errors push some slightly outside. Fix: project all eigenvalues onto the unit circle.
-```
-λᵢ → λᵢ / |λᵢ|
-```
-
-For FI (dissipative): |λᵢ| should be ≤ 1. Fix: clamp any |λᵢ| > 1 to exactly 1, preserving the phase (damping direction).
-
-The stabilized propagator is reconstructed: P_stable = V · diag(λ_fixed) · V⁻¹.
+The solvers don't know or care which mesh type produced the operators. They just see M_diag, S, and B_total.
 
 ---
 
-## 7. Analytical Validation (Rigid Rectangular Room)
+## 7. Validation: How We Know the Results Are Correct
 
-For a rectangular room with perfectly rigid walls, the exact solution is known via modal expansion:
+### 7.1 Analytical Comparison (Rectangular Room)
+
+For a rigid rectangular room, the exact eigenfrequencies are known:
 
 ```
-p(x, y, t) = Σ_{m,n} A_{mn} · cos(mπx/Lx) · cos(nπy/Ly) · cos(ω_{mn} t)
+f_{m,n,l} = (c/2) * sqrt((m/Lx)^2 + (n/Ly)^2 + (l/Lz)^2)
 ```
 
-where:
-- ω_{mn} = cπ √((m/Lx)² + (n/Ly)²) — the modal frequencies
-- A_{mn} — coefficients determined by the initial condition (Gaussian pulse)
+Our hex SEM matches these to 14 digits (machine precision) for low modes.
 
-The (m,n) = (0,0) mode is the DC component (uniform pressure). Higher modes correspond to standing wave patterns. For a 4×2 m room, the first few modal frequencies are:
+### 7.2 Dauge Benchmark (L-Shaped Domain)
 
-| Mode (m,n) | Frequency [Hz] |
-|-----------|----------------|
-| (1,0)     | 42.9           |
-| (0,1)     | 85.8           |
-| (1,1)     | 95.9           |
-| (2,0)     | 85.8           |
-| (2,1)     | 121.2          |
+The Neumann eigenvalues of the Laplacian on an L-shaped domain have been computed to 11+ digits by Monique Dauge's group using specially refined meshes. Our unstructured quad SEM matches these:
 
-This analytical solution is used to verify the FOM: if the numerical IR matches the modal expansion to within ~0.03% relative error, the spatial discretization and time integrator are working correctly.
+- Mode 1 (singular corner eigenfunction): error 5.7e-05
+- Modes 3-4 (exact pi^2): error 1e-14 (machine precision)
+- Regular modes: error 1e-8
+
+The singular mode converges slower because the 270-degree reentrant corner creates a singularity in the eigenfunction that polynomials can't resolve efficiently.
+
+### 7.3 Tet Convergence Study
+
+For P=2 tets on a unit cube, eigenvalue errors converge at rate O(h^2):
+
+| Element size h | DOFs | Mode 1 error |
+|---------------|------|-------------|
+| 0.40 | 325 | 3.4% |
+| 0.25 | 945 | 1.5% |
+| 0.15 | 4,035 | 0.51% |
+| 0.10 | 11,193 | 0.24% |
+
+### 7.4 Energy Conservation
+
+For PR (rigid walls), the total acoustic energy must be constant. Our best result: drift of 6.3e-08 over thousands of time steps (hex), 4.9e-06 (P=2 tet on refined mesh). This confirms the operators are mathematically consistent.
+
+For FI (absorbing walls), energy must decay monotonically. Verified on every test case.
+
+### 7.5 Cross-Validation
+
+The extruded hex mesh produces identical results to the Kronecker-product structured mesh when run on a box geometry: relative error 1.17e-14. This proves the unstructured assembly computes the same operators as the fast structured path.
 
 ---
 
-## 8. Energy Diagnostics
+## 8. What the Code Actually Contains
 
-Total acoustic energy in the discrete system:
-
-**p-Φ formulation:**
 ```
-H = (ρ/2) Φᵀ S Φ  +  (1/2ρc²) pᵀ M p
+room_acoustics/
+  sem.py                  — Structured mesh (RectMesh2D, BoxMesh3D) + Kronecker assembly
+  unstructured_sem.py     — Unstructured quad/hex mesh + element-by-element assembly
+  tet_sem.py              — P=2 tet mesh + assembly (any 3D geometry)
+  geometry.py             — Room shape definitions + Gmsh quad meshing + extrusion
+  gmsh_tet_import.py      — Gmsh tet meshing + .msh file import
+  solvers.py              — FOM + ROM solvers (p-v, p-Phi), boundary conditions, basis builders
+  results_io.py           — JSON data export for validation results
+  visualize.py            — Pressure field visualizations
+  validate.py             — 2D validation suite (9 tests)
+  validate_3d.py          — 3D structured validation
+  validate_unstructured.py     — 2D unstructured validation
+  validate_unstructured_3d.py  — 3D extruded validation
+  validate_eigenfrequencies.py — Eigenfrequency validation vs analytical + Dauge
+  validate_tet_3d.py      — Tet element validation suite
 ```
 
-**p-v formulation:**
-```
-H = (ρ/2)(uᵀMu + vᵀMv)  +  (1/2ρc²) pᵀ M p
-```
+### Key Design Principle
 
-Expected behavior:
-- **PR:** H = constant (energy conservation — the gold standard test)
-- **FI:** H decays monotonically (energy leaves through walls)
-- **LR:** H decays faster for thicker/softer materials (more absorption)
+The codebase has a strict separation:
+- **Mesh layer** produces: N_dof, coordinates, boundary nodes
+- **Assembly layer** produces: {M_diag, M_inv, S, B_total}
+- **Solver/ROM layer** consumes only the above — never touches elements
 
-If energy grows in any case, something is wrong (numerical instability, incorrect boundary implementation, or a broken ROM basis).
+This means you can add a new element type without changing a single line in the solvers.
 
 ---
 
-## 9. Speedup Analysis
+## 9. Performance Summary
 
-The ROM speedup depends on the ratio N/r and the time integration cost:
-
-| Component | FOM cost | ROM cost |
-|-----------|----------|----------|
-| Per time step | O(nnz) sparse matvec | O(r²) dense matvec |
-| Total steps | Nt | Nt (same Δt) |
-| Offline (one-time) | — | O(N · Nt_snap) SVD + O(N · r · nnz) projection |
-
-**When does ROM pay off?**
-- The offline cost (FOM snapshots + SVD + operator projection) must be amortized. If you only need one simulation, ROM is slower. ROM shines when you run **many simulations** with different sources, receivers, or boundary conditions on the same geometry.
-- The online speedup scales as ~(nnz / r²). For N = 36,000 (3D, 1kHz), nnz ≈ 3.8M, and r = 40: theoretical speedup ≈ 2,375×. Measured: ~100× (overhead from Python, memory access, non-optimized loops).
-- For small 2D problems (N < 5,000), the FOM is already fast enough that ROM overhead dominates. Speedup: only 5-7×.
+| Configuration | N_dof | FOM time | ROM speedup | ROM error |
+|--------------|-------|----------|-------------|-----------|
+| 2D rect (P=4 hex) | 3,825 | 1.2s | 83x | 2e-3 |
+| 2D rect large (P=4 hex) | 10,293 | 3.5s | 351x | 3e-1 to 1e-3 |
+| 3D cube (P=4 hex) | 35,937 | 71s | 583x | 3e-4 |
+| 3D L-shape hex (extruded) | 11,097 | 9.8s | 744x | 8e-4 |
+| 3D L-shape tet (P=2, h=0.2) | 25,410 | 7.7s | 476x | 1e-2 |
 
 ---
 
-## 10. Known Limitations and Open Problems
+## 10. Current Limitations
 
-### 10.1 ROM Stability for Absorbing Boundaries
+### 10.1 Assembly Speed
 
-The standard PSD basis preserves the symplectic (energy-conserving) structure of the p-Φ formulation. But for absorbing walls (FI, LR), the system is **dissipative**, not conservative. The ROM must also preserve the dissipative structure — otherwise energy can grow in the reduced model even though it decays in the FOM.
+The unstructured/tet assembly loops over elements in pure Python. For meshes above ~50K DOFs, assembly takes minutes. Fix: Numba JIT compilation of the element loop (same code, 50-100x faster).
 
-The modified PSD basis (boundary enrichment) partially addresses this by including boundary pressure in the snapshot matrix. However, for long simulations (T > 100ms), the ROM can still drift. A fully port-Hamiltonian Galerkin projection that separately preserves the conservative and dissipative parts is the proper fix (this is the main contribution of Bonthu et al. 2026).
+### 10.2 GPU Support
 
-### 10.2 Geometry Limitations
-
-The current implementation uses structured rectangular/box meshes only. Real rooms have irregular shapes, columns, furniture, etc. Extending to unstructured meshes requires:
-- Replacing Kronecker-product assembly with element-by-element assembly
-- Handling non-conforming interfaces
-- More complex boundary node identification
+The FOM solver supports CuPy for GPU-accelerated sparse matvecs, but requires matching CuPy and CUDA toolkit versions. When it works, GPU gives 10-50x FOM speedup for large meshes.
 
 ### 10.3 Frequency Range
 
-The SEM resolution is fixed at mesh creation time. To resolve higher frequencies, you need more elements (larger N), which makes the FOM slower — but also makes the ROM more valuable (bigger N/r ratio → bigger speedup).
+SEM resolution is fixed at mesh creation. Higher frequencies need finer meshes (more DOFs). For full-bandwidth auralization (20 Hz - 20 kHz), a hybrid approach is needed: wave-based (SEM) for low frequencies, geometric acoustics (ray tracing) for high frequencies.
 
-The practical upper limit is set by memory: 3D problems at 2kHz with PPW=10 need N > 500,000 DOFs, and snapshot storage for ROM basis construction becomes the bottleneck (~10+ GB for 2000 snapshots).
+### 10.4 Tet Accuracy vs Hex
+
+P=2 tets have O(h^2) convergence. P=4 hexes have spectral convergence. For the same accuracy, tets need a much finer mesh. The tradeoff: tets mesh anything, hexes are more accurate per DOF.
 
 ---
 
 ## 11. References
 
-1. **Bonthu et al. (2026)** — "Stable Model Order Reduction for Time-Domain Room Acoustics." Introduces the modified p-Φ formulation with boundary-energy enrichment for stable ROMs with absorbing walls.
-
-2. **Sampedro Llopis et al. (2022)** — "Reduced Basis Methods for Numerical Room Acoustic Simulations with Parametrized Boundaries." POD/PSD for room acoustics with frequency-dependent impedance.
-
-3. **Miki (1990)** — "Acoustical properties of porous materials — Modifications of Delany-Bazley models." Empirical impedance model for fibrous absorbers.
-
-4. **Gustavsen & Semlyen (1999)** — "Rational approximation of frequency domain responses by vector fitting." The algorithm used to convert Z_s(f) into time-domain ADE poles.
-
-5. **Patera (1984)** — "A spectral element method for fluid dynamics." Foundation of the SEM approach.
+1. **Bonthu et al. (2026)** — Stable MOR for Time-Domain Room Acoustics
+2. **Sampedro Llopis et al. (2022)** — Reduced Basis Methods for Room Acoustics
+3. **Miki (1990)** — Acoustic properties of porous materials (impedance model)
+4. **Gustavsen & Semlyen (1999)** — Vector fitting (frequency-to-time-domain conversion)
+5. **Patera (1984)** — Spectral element method foundations
+6. **Keast (1986)** — Quadrature rules for tetrahedra
+7. **Dauge** — Maxwell eigenvalue benchmark (Neumann eigenvalues on L-shaped domain), https://perso.univ-rennes1.fr/monique.dauge/benchmax.html
