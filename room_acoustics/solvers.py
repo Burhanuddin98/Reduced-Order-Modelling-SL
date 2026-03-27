@@ -34,6 +34,19 @@ except ImportError:
 C_AIR   = 343.0     # speed of sound  [m/s]
 RHO_AIR = 1.2       # density of air  [kg/m³]
 
+
+def _fi_coefficient(bc_params, rc2, M_inv, B_diag):
+    """Compute the FI boundary damping coefficient vector.
+
+    Supports both uniform Z and per-node Z_per_node.
+    """
+    if 'Z_per_node' in bc_params:
+        Z_vec = np.asarray(bc_params['Z_per_node'], dtype=float)
+        return -rc2 * M_inv * B_diag / Z_vec
+    else:
+        Z = bc_params['Z']
+        return -rc2 / Z * M_inv * B_diag
+
 # ---------------------------------------------------------------------------
 # Miki model  (for LR boundaries)
 # ---------------------------------------------------------------------------
@@ -678,8 +691,7 @@ def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
         A_r[Nrb:, :Nrb] = K2 * np.eye(Nrb)
 
         if bc_type == 'FI':
-            Z = bc_params['Z']
-            fi_vec = -rc2 / Z * M_inv * B_diag
+            fi_vec = _fi_coefficient(bc_params, rc2, M_inv, B_diag)
             K3_r = Psi.T @ (fi_vec[:, None] * Psi)
             A_r[:Nrb, :Nrb] += K3_r
 
@@ -718,8 +730,7 @@ def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
     bnd_B = B_diag[bnd_nodes]
 
     if bc_type == 'FI':
-        Z = bc_params['Z']
-        fi_vec = -rc2 / Z * M_inv * B_diag
+        fi_vec = _fi_coefficient(bc_params, rc2, M_inv, B_diag)
         K3_r = Psi.T @ (fi_vec[:, None] * Psi)
 
     def rhs(ap, aPhi, ade_l=None):
@@ -792,8 +803,7 @@ def rom_pv(mesh, ops, Psi_p, Psi_u, Psi_v, bc_type, bc_params,
     L4_r = Psi_p.T @ (rc2 * (M_inv[:, None] * SyT.dot(Psi_v)))
 
     if bc_type == 'FI':
-        Z = bc_params['Z']
-        fi_vec = -rc2 / Z * M_inv * B_diag
+        fi_vec = _fi_coefficient(bc_params, rc2, M_inv, B_diag)
         L5_r = Psi_p.T @ (fi_vec[:, None] * Psi_p)
 
     # IC
@@ -919,8 +929,8 @@ def fom_pphi_3d_gpu(mesh, ops, bc_type, bc_params, x0, y0, z0, sigma,
     bnd_nodes = mesh.all_boundary_nodes()
     fi_coeff_d = None
     if bc_type == 'FI':
-        Z = bc_params['Z']
-        fi_coeff = -rc2 / Z * ops['M_inv'] * np.array(ops['B_total'].diagonal())
+        B_diag = np.array(ops['B_total'].diagonal())
+        fi_coeff = _fi_coefficient(bc_params, rc2, ops['M_inv'], B_diag)
         fi_coeff_d = xp.asarray(fi_coeff) if use_gpu else fi_coeff
 
     # Initial state
@@ -1013,8 +1023,7 @@ def rom_pphi_3d(mesh, ops, Psi_H, bc_type, bc_params,
     A_r[Nrb:, :Nrb] = K2 * np.eye(Nrb)
 
     if bc_type == 'FI':
-        Z = bc_params['Z']
-        fi_vec = -rc2 / Z * M_inv * B_diag
+        fi_vec = _fi_coefficient(bc_params, rc2, M_inv, B_diag)
         K3_r = Psi.T @ (fi_vec[:, None] * Psi)
         A_r[:Nrb, :Nrb] = K3_r
 
