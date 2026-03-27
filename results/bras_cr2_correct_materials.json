@@ -1,0 +1,39 @@
+{
+  "metadata": {
+    "name": "bras_cr2_correct_materials",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-27T21:05:21.362586+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "bras_absorption_500Hz": {
+      "ceiling": 0.048,
+      "floor": 0.07,
+      "concrete": 0.056,
+      "plaster": 0.039,
+      "windows": 0.049
+    },
+    "sabine_rt60": 2.536426695928205,
+    "eyring_rt60": 2.4689213832744783,
+    "measured_T30_mean": 1.663,
+    "measured_EDT_mean": 1.166,
+    "measured_C80_mean": 2.6,
+    "measured_D50_mean": 0.489,
+    "simulated": {
+      "T30_s": 1.0031501397795335,
+      "T30_R2": 0.8958602884563658,
+      "T20_s": 1.0715668413329327,
+      "T20_R2": 0.926565171238363,
+      "EDT_s": 1.9381675159534928,
+      "EDT_R2": 0.9889181157550581,
+      "C80_dB": -4.159037010114484,
+      "D50": 0.1857466923890365,
+      "TS_ms": 158.37283256638852
+    },
+    "mesh": {
+      "N_dof": 30413,
+      "N_el": 20544
+    },
+    "fom_time_s": 80.62172609999834
+  }
+}
