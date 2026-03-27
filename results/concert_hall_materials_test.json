@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "name": "concert_hall_materials_test",
+    "suite": "material_test",
+    "timestamp": "2026-03-27T20:33:19.079627+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "mesh": {
+      "N_dof": 25410,
+      "N_el": 17070,
+      "h": 0.4,
+      "P": 2,
+      "volume_m3": 143.99999999999932,
+      "surface_m2": 183.99999999999997,
+      "volume_expected": 144.0,
+      "labels": [
+        "floor",
+        "ceiling",
+        "bottom",
+        "right_lower",
+        "notch_bottom",
+        "notch_right",
+        "top",
+        "left"
+      ]
+    },
+    "source": [
+      2.0,
+      2.0,
+      2.0
+    ],
+    "receiver": [
+      5.915237648662444,
+      1.0113086451588948,
+      1.6
+    ],
+    "dt": 2.595e-05,
+    "T": 0.06,
+    "eigenfrequencies_Hz": [
+      6.0562274710526735e-06,
+      18.406973047250805,
+      30.852325175579832,
+      42.82728518781724,
+      42.82931396857725,
+      46.60210127548171,
+      49.845055403751246,
+      52.7457032909082
+    ],
+    "configs": {
+      "rigid": {
+        "desc": "All walls rigid (PR)",
+        "fom_time_s": 6.418330200001947,
+        "ir_peak": 0.03536679507391694,
+        "ir_rms": 0.01304939319884125,
+        "energy_drift": 4.373442142652336e-06
+      },
+      "uniform_concrete": {
+        "desc": "All walls concrete (Z=50000)",
+        "fom_time_s": 6.577050500000041,
+        "ir_peak": 0.03046665260181655,
+        "ir_rms": 0.011635137272015431,
+        "energy_ratio": 0.7051114172901751,
+        "monotonic_decay": true,
+        "rom_sweep": [
+          {
+            "Nrb": 5,
+            "speedup": 469.1053870755414,
+            "error_Linf": 0.030679902744925103
+          },
+          {
+            "Nrb": 10,
+            "speedup": 412.8043961824022,
+            "error_Linf": 0.033049140218614784
+          },
+          {
+            "Nrb": 20,
+            "speedup": 251.85087285816925,
+            "error_Linf": 0.03454781559988546
+          }
+        ],
+        "Nrb_auto": 33
+      },
+      "mixed_concert": {
+        "desc": "Floor=wood, ceiling=panel, walls=plaster",
+        "fom_time_s": 6.585545800000546,
+        "ir_peak": 0.02004701288517014,
+        "ir_rms": 0.006503271098482586,
+        "energy_ratio": 0.12214893822002647,
+        "monotonic_decay": true,
+        "rom_sweep": [
+          {
+            "Nrb": 5,
+            "speedup": 549.6624208547016,
+            "error_Linf": 0.026521251556060235
+          },
+          {
+            "Nrb": 10,
+            "speedup": 454.05822341836375,
+            "error_Linf": 0.024378526827143268
+          },
+          {
+            "Nrb": 20,
+            "speedup": 276.7712207234081,
+            "error_Linf": 0.02286637156999574
+          }
+        ],
+        "Nrb_auto": 33
+      },
+      "mixed_absorptive": {
+        "desc": "Floor=carpet, ceiling=thick_panel, walls=curtain",
+        "fom_time_s": 7.028937700000824,
+        "ir_peak": 0.01724525150082356,
+        "ir_rms": 0.004022975193931862,
+        "energy_ratio": 0.014290684315666251,
+        "monotonic_decay": true,
+        "rom_sweep": [
+          {
+            "Nrb": 5,
+            "speedup": 455.4978021125958,
+            "error_Linf": 0.017327958353263513
+          },
+          {
+            "Nrb": 10,
+            "speedup": 392.6970241539948,
+            "error_Linf": 0.018665902326971347
+          },
+          {
+            "Nrb": 20,
+            "speedup": 253.02578705465416,
+            "error_Linf": 0.018023436583485482
+          }
+        ],
+        "Nrb_auto": 32
+      }
+    },
+    "verification_passed": true,
+    "checks": [
+      {
+        "name": "Volume",
+        "pass": true,
+        "detail": "144.0 (expected 144.0)"
+      },
+      {
+        "name": "PR energy drift",
+        "pass": true,
+        "detail": "4.37e-06"
+      },
+      {
+        "name": "uniform_concrete monotonic",
+        "pass": true,
+        "detail": "True"
+      },
+      {
+        "name": "mixed_concert monotonic",
+        "pass": true,
+        "detail": "True"
+      },
+      {
+        "name": "mixed_absorptive monotonic",
+        "pass": true,
+        "detail": "True"
+      },
+      {
+        "name": "Absorption ordering",
+        "pass": true,
+        "detail": "concrete=0.705 > concert=0.122 > absorptive=0.014"
+      },
+      {
+        "name": "Mode 1 plausible",
+        "pass": true,
+        "detail": "18.4 Hz"
+      },
+      {
+        "name": "uniform_concrete ROM",
+        "pass": true,
+        "detail": "err=3.45e-02, sp=252x"
+      },
+      {
+        "name": "mixed_concert ROM",
+        "pass": true,
+        "detail": "err=2.29e-02, sp=277x"
+      },
+      {
+        "name": "mixed_absorptive ROM",
+        "pass": true,
+        "detail": "err=1.80e-02, sp=253x"
+      }
+    ]
+  }
+}
