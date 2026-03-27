@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "name": "ard_test_room",
+    "suite": "real_geometry",
+    "timestamp": "2026-03-27T20:12:30.113186+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "source_file": "ARD_test.stl",
+    "mesh": {
+      "N_dof": 15664,
+      "N_el": 9371,
+      "h_target": 2.0,
+      "h_min": 0.15549073883280926,
+      "P": 2
+    },
+    "volume_m3": 5097.652301993528,
+    "surface_m2": 1778.001141326067,
+    "dt": 1.1333144229796593e-05,
+    "T": 0.05,
+    "fi_energy_ratio": 0.5486820674593184,
+    "fom_time_s": 9.028293399998802,
+    "Nrb_auto": 27
+  }
+}

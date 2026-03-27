@@ -140,6 +140,77 @@ def import_msh_file(filepath, P=2):
     return result
 
 
+def import_surface_mesh(filepath, h_target, P=2, verbose=False):
+    """
+    Import an STL/OBJ surface mesh and create a volume tet mesh.
+
+    Works with any closed (watertight) surface mesh. Gmsh classifies
+    the surface into patches, creates a volume, and tet-meshes it.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to .stl or .obj file.
+    h_target : float
+        Target element edge length [m].
+    P : int
+        Polynomial order (default 2).
+    verbose : bool
+        Print Gmsh output.
+
+    Returns
+    -------
+    Same dict as generate_tet_mesh / import_msh_file.
+    """
+    import math
+    if not GMSH_AVAILABLE:
+        raise ImportError("Gmsh Python API required: pip install gmsh")
+
+    gmsh.initialize()
+    if not verbose:
+        gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("imported")
+    gmsh.merge(filepath)
+
+    # Classify the imported triangulation into geometric surfaces
+    angle = 40 * math.pi / 180
+    gmsh.model.mesh.classifySurfaces(angle, True, True, angle)
+    gmsh.model.mesh.createGeometry()
+    gmsh.model.mesh.createTopology()
+
+    ents = gmsh.model.getEntities()
+    surfs = [t for d, t in ents if d == 2]
+    vols = [t for d, t in ents if d == 3]
+
+    if not vols:
+        # Create volume manually from surface loop
+        sl = gmsh.model.geo.addSurfaceLoop(surfs)
+        vol = gmsh.model.geo.addVolume([sl])
+        gmsh.model.geo.synchronize()
+        vols = [vol]
+
+    # Physical groups
+    pg = gmsh.model.addPhysicalGroup(3, vols)
+    gmsh.model.setPhysicalName(3, pg, "room")
+    for i, s in enumerate(surfs):
+        pg = gmsh.model.addPhysicalGroup(2, [s])
+        gmsh.model.setPhysicalName(2, pg, f"wall_{i}")
+
+    # Mesh options
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h_target * 0.5)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h_target * 2.0)
+    gmsh.option.setNumber("Mesh.Algorithm3D", 1)
+    gmsh.option.setNumber("Mesh.ElementOrder", P)
+    gmsh.option.setNumber("Mesh.Optimize", 1)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+
+    gmsh.model.mesh.generate(3)
+
+    result = _extract_mesh_data(P)
+    gmsh.finalize()
+    return result
+
+
 def _extract_mesh_data(P):
     """Extract nodes, tets, and boundary faces from the current Gmsh model."""
 
