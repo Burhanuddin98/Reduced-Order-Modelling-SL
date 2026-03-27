@@ -1,0 +1,111 @@
+{
+  "metadata": {
+    "name": "bras_cr2_benchmark",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-27T20:50:22.047783+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "room": {
+      "name": "BRAS CR2 Seminar Room",
+      "Lx": 8.4,
+      "Ly": 6.7,
+      "Lz": 3.0,
+      "volume_m3": 168.84,
+      "surface_m2": 203.16000000000003
+    },
+    "materials": {
+      "floor": {
+        "alpha": 0.03,
+        "Z": 54053.66580812854,
+        "area": 56.28
+      },
+      "ceiling": {
+        "alpha": 0.5,
+        "Z": 2398.980604545532,
+        "area": 56.28
+      },
+      "bottom": {
+        "alpha": 0.02,
+        "Z": 81494.72115909398,
+        "area": 25.200000000000003
+      },
+      "top": {
+        "alpha": 0.02,
+        "Z": 81494.72115909398,
+        "area": 25.200000000000003
+      },
+      "left": {
+        "alpha": 0.04,
+        "Z": 40332.59956259104,
+        "area": 20.1
+      },
+      "right": {
+        "alpha": 0.06,
+        "Z": 26610.433528750367,
+        "area": 20.1
+      }
+    },
+    "mean_alpha": 0.16167749556999408,
+    "mesh": {
+      "N_dof": 30413,
+      "N_el": 20544,
+      "h": 0.4,
+      "P": 2,
+      "volume_computed": 168.8399999999992
+    },
+    "simulation": {
+      "dt": 2.416e-05,
+      "T": 0.5,
+      "Nt": 20695,
+      "fom_time_s": 73.08391979999942
+    },
+    "analytical": {
+      "sabine_rt60_s": 0.8275865848312144,
+      "eyring_rt60_s": 0.7587201795752033
+    },
+    "metrics": {
+      "T30_s": 1.146729357650909,
+      "T30_R2": 0.955367551619973,
+      "T20_s": 1.1972408907894703,
+      "T20_R2": 0.9845287024585698,
+      "EDT_s": 1.6108291730118958,
+      "EDT_R2": 0.9914002444656131,
+      "C80_dB": -1.4722361781919115,
+      "D50": 0.3181558633634001,
+      "TS_ms": 124.55618576112985
+    },
+    "comparison": {
+      "T30_vs_sabine_pct": 38.5630674384099,
+      "T30_vs_eyring_pct": 51.13995759186826
+    },
+    "verification_passed": true,
+    "checks": [
+      {
+        "name": "Volume",
+        "pass": true,
+        "detail": "168.84 vs 168.84"
+      },
+      {
+        "name": "T30 fit quality",
+        "pass": true,
+        "detail": "R^2=0.955"
+      },
+      {
+        "name": "T30 vs Sabine",
+        "pass": true,
+        "detail": "38.6% (< 40%)"
+      },
+      {
+        "name": "C80 plausible",
+        "pass": true,
+        "detail": "-1.5 dB"
+      },
+      {
+        "name": "D50 in [0,1]",
+        "pass": true,
+        "detail": "0.318"
+      }
+    ]
+  }
+}
