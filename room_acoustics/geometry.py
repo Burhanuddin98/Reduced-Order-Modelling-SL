@@ -265,3 +265,104 @@ def generate_quad_mesh(geometry, h_target, P=4, verbose=False):
         boundary=boundary,
         wall_labels=wall_labels,
     )
+
+
+# ---------------------------------------------------------------------------
+# 2D → 3D extrusion
+# ---------------------------------------------------------------------------
+
+def extrude_quad_mesh(mesh_2d, Lz, n_layers):
+    """
+    Extrude a 2D quad mesh into 3D hex elements.
+
+    Each quad becomes *n_layers* hexahedra stacked along z in [0, Lz].
+    Boundary data is generated for floor (z=0), ceiling (z=Lz), and
+    each original 2D wall label extended vertically.
+
+    Parameters
+    ----------
+    mesh_2d : dict
+        Output from ``generate_quad_mesh``: nodes, quads, boundary.
+    Lz : float
+        Room height [m].
+    n_layers : int
+        Number of element layers in z.
+
+    Returns
+    -------
+    dict with keys:
+        nodes_3d  : (N_nodes_3d, 3) array
+        hexes     : (N_el_3d, 8) int array — hex connectivity
+        boundary  : dict mapping label -> list of (n0,n1,n2,n3) face quads
+        wall_labels : list of str
+    """
+    nodes_2d = mesh_2d['nodes']       # (N2, 2)
+    quads_2d = mesh_2d['quads']       # (N_el_2d, 4)
+    bnd_2d   = mesh_2d['boundary']    # label -> [(n1,n2), ...]
+    N2 = len(nodes_2d)
+    N_el_2d = len(quads_2d)
+    hz = Lz / n_layers
+
+    # z-coordinates of node layers (n_layers + 1 levels)
+    z_levels = np.linspace(0, Lz, n_layers + 1)
+
+    # 3D nodes: replicate 2D nodes at each z-level
+    N3 = N2 * (n_layers + 1)
+    nodes_3d = np.zeros((N3, 3))
+    for k, z in enumerate(z_levels):
+        offset = k * N2
+        nodes_3d[offset:offset + N2, 0] = nodes_2d[:, 0]
+        nodes_3d[offset:offset + N2, 1] = nodes_2d[:, 1]
+        nodes_3d[offset:offset + N2, 2] = z
+
+    # Hex connectivity: for each quad (n0,n1,n2,n3) at layer k:
+    #   bottom face = (n0+k*N2, n1+k*N2, n2+k*N2, n3+k*N2)
+    #   top face    = (n0+(k+1)*N2, n1+(k+1)*N2, n2+(k+1)*N2, n3+(k+1)*N2)
+    # VTK hex ordering: bottom (0,1,2,3) then top (4,5,6,7)
+    hexes = np.zeros((N_el_2d * n_layers, 8), dtype=int)
+    for k in range(n_layers):
+        bot = k * N2
+        top = (k + 1) * N2
+        for e, (n0, n1, n2, n3) in enumerate(quads_2d):
+            idx = k * N_el_2d + e
+            hexes[idx] = [
+                n0 + bot, n1 + bot, n2 + bot, n3 + bot,
+                n0 + top, n1 + top, n2 + top, n3 + top,
+            ]
+
+    # Boundary faces
+    boundary_3d = {}
+
+    # Floor (z=0): all quads at layer 0 bottom faces
+    floor_faces = []
+    for n0, n1, n2, n3 in quads_2d:
+        floor_faces.append((n0, n1, n2, n3))
+    boundary_3d['floor'] = floor_faces
+
+    # Ceiling (z=Lz): all quads at top layer
+    ceil_faces = []
+    top_off = n_layers * N2
+    for n0, n1, n2, n3 in quads_2d:
+        ceil_faces.append((n0 + top_off, n1 + top_off,
+                           n2 + top_off, n3 + top_off))
+    boundary_3d['ceiling'] = ceil_faces
+
+    # Vertical walls: extrude each 2D boundary edge into quad faces
+    for label, edges in bnd_2d.items():
+        wall_faces = []
+        for k in range(n_layers):
+            bot = k * N2
+            top = (k + 1) * N2
+            for n0, n1 in edges:
+                # Quad face: (n0_bot, n1_bot, n1_top, n0_top)
+                wall_faces.append((n0 + bot, n1 + bot, n1 + top, n0 + top))
+        boundary_3d[label] = wall_faces
+
+    return dict(
+        nodes_3d=nodes_3d,
+        hexes=hexes,
+        boundary=boundary_3d,
+        wall_labels=list(boundary_3d.keys()),
+        Lz=Lz,
+        n_layers=n_layers,
+    )
