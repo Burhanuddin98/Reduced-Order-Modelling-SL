@@ -1,0 +1,15 @@
+Room Acoustics 2D Validation Report
+==================================================
+Mesh: 21x11 elements, P=4
+Domain: 4.0x2.0 m
+dt=1e-05, CFL=0.2
+
+Test 1 (PR): eps_ana_pphi=2.967224e-04
+             eps_form=8.616011e-04
+             speedup(pv/pphi)=1.96
+Test 2 (FI Z=600): eps=2.563592e-04
+Test 2 (FI Z=16000): eps=7.228038e-04
+Test 3 (LR d=0.05): eps=2.770518e-04
+Test 3 (LR d=0.2): eps=2.558358e-04
+
+Total time: 224.4s
