@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "name": "bras_cr2_octave_band",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-27T22:25:07.165784+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "bands": [
+      {
+        "fc": 63,
+        "sim_T30": NaN,
+        "meas_T30": NaN,
+        "err_pct": 999.0
+      },
+      {
+        "fc": 125,
+        "sim_T30": 0.04848356034783759,
+        "meas_T30": NaN,
+        "err_pct": 999.0
+      },
+      {
+        "fc": 250,
+        "sim_T30": 1.0298387527173571,
+        "meas_T30": 1.6933399516299015,
+        "err_pct": 39.1829885235921
+      }
+    ],
+    "mesh": {
+      "N_dof": 23001,
+      "P": 4
+    }
+  }
+}
