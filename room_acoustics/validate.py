@@ -303,8 +303,20 @@ def test5_rom_short():
         t_fom = time.perf_counter() - t0
 
         # build PSD basis
-        Psi_H, sigma_vals, Nrb = build_psd_basis(
-            res_fom['snaps_p'], res_fom['snaps_Phi'], eps_pod=1e-6)
+        store_bp = (bc_type != 'PR')
+        if store_bp:
+            # Re-run FOM with boundary pressure for modified basis
+            res_fom2 = fom_pphi(mesh, ops, bc_type, bc_params,
+                                SRC_X, SRC_Y, SIGMA, DT, T,
+                                rec_idx=rec, store_snapshots=True,
+                                store_boundary_pressure=True, snap_stride=5)
+            Psi_H, sigma_vals, Nrb = build_modified_psd_basis(
+                res_fom2['snaps_p'], res_fom2['snaps_Phi'],
+                res_fom2['snaps_pb'], eps_pod=1e-8)
+            del res_fom2; gc.collect()
+        else:
+            Psi_H, sigma_vals, Nrb = build_psd_basis(
+                res_fom['snaps_p'], res_fom['snaps_Phi'], eps_pod=1e-8)
         del res_fom['snaps_p'], res_fom['snaps_Phi']; gc.collect()
         Nrb_use = min(Nrb, 122)
         print(f"    PSD basis: Nrb_auto={Nrb}, using Nrb={Nrb_use}")
@@ -497,51 +509,90 @@ def test7_eigenvalues():
 #  TEST 8 — Speedup analysis
 # ===================================================================
 
-def test8_speedup():
-    print("\n" + "="*70)
-    print("TEST 8: Speedup analysis")
-    print("="*70)
-    mesh = make_mesh()
-    ops  = assemble_2d_operators(mesh)
-    rec  = mesh.nearest_node(REC_X, REC_Y)
-    T    = 0.05
+def _run_speedup_sweep(mesh, ops, bc_type, bc_params, src_x, src_y, sigma_s,
+                       dt_s, T_s, rec_idx, label, nrb_list, eps_pod=1e-10):
+    """Run FOM then ROM sweep, return (nrb_used, speedups, errors, t_fom)."""
+    # FOM with snapshots
+    res_fom = fom_pphi(mesh, ops, bc_type, bc_params, src_x, src_y, sigma_s,
+                       dt_s, T_s, rec_idx=rec_idx, store_snapshots=True,
+                       snap_stride=5)
+    Psi_H, _, _ = build_psd_basis(
+        res_fom['snaps_p'], res_fom['snaps_Phi'], eps_pod=eps_pod)
+    del res_fom['snaps_p'], res_fom['snaps_Phi']; gc.collect()
 
-    # build ROM basis
-    res_fom = fom_pphi(mesh, ops, 'PR', {}, SRC_X, SRC_Y, SIGMA,
-                       DT, T, rec_idx=rec, store_snapshots=True)
-    Psi_H, sigma_vals, _ = build_psd_basis(
-        res_fom['snaps_p'], res_fom['snaps_Phi'], eps_pod=1e-10)
-
-    # time FOM
+    # time FOM (clean run, no snapshot overhead)
     t0 = time.perf_counter()
-    _ = fom_pphi(mesh, ops, 'PR', {}, SRC_X, SRC_Y, SIGMA, DT, T, rec_idx=rec)
+    _ = fom_pphi(mesh, ops, bc_type, bc_params, src_x, src_y, sigma_s,
+                 dt_s, T_s, rec_idx=rec_idx)
     t_fom = time.perf_counter() - t0
 
-    nrb_list = [10, 20, 40, 80, 120]
-    nrb_list = [n for n in nrb_list if n <= Psi_H.shape[1]]
-    speedups = []
-    errors   = []
-
-    for Nrb in nrb_list:
+    nrb_used = [n for n in nrb_list if n <= Psi_H.shape[1]]
+    speedups, errors = [], []
+    for Nrb in nrb_used:
         t0 = time.perf_counter()
-        res_r = rom_pphi(mesh, ops, Psi_H, 'PR', {},
-                         SRC_X, SRC_Y, SIGMA, DT, T,
-                         rec_idx=rec, Nrb_override=Nrb)
+        res_r = rom_pphi(mesh, ops, Psi_H, bc_type, bc_params,
+                         src_x, src_y, sigma_s, dt_s, T_s,
+                         rec_idx=rec_idx, Nrb_override=Nrb)
         t_rom = time.perf_counter() - t0
         eps = np.max(np.abs(res_fom['ir'] - res_r['ir']))
         sp = t_fom / t_rom
         speedups.append(sp)
         errors.append(eps)
-        print(f"  Nrb={Nrb:4d}: speedup={sp:6.1f}×, error={eps:.2e}")
+        print(f"  {label} Nrb={Nrb:4d}: speedup={sp:6.1f}x, error={eps:.2e}")
+    return nrb_used, speedups, errors, t_fom
 
+
+def test8_speedup():
+    print("\n" + "="*70)
+    print("TEST 8: Speedup analysis (small + large mesh)")
+    print("="*70)
+
+    nrb_list = [5, 10, 20, 40, 80, 120]
+
+    # --- (a) Original small mesh (N~3700) ---
+    mesh_s = make_mesh()
+    ops_s  = assemble_2d_operators(mesh_s)
+    rec_s  = mesh_s.nearest_node(REC_X, REC_Y)
+    print(f"\n  Small mesh: N_dof={mesh_s.N_dof}")
+    nrb_s, sp_s, er_s, _ = _run_speedup_sweep(
+        mesh_s, ops_s, 'PR', {}, SRC_X, SRC_Y, SIGMA, DT, 0.05, rec_s,
+        "small", nrb_list)
+
+    # --- (b) Large mesh (f_max=1500 Hz, ~15k DOF) ---
+    f_max_L = 1500.0
+    ppw_L = 8
+    lam_L = C_AIR / f_max_L
+    h_L = lam_L / ppw_L * P_ORDER
+    nex_L = max(2, int(np.ceil(LX / h_L)))
+    ney_L = max(2, int(np.ceil(LY / h_L)))
+    mesh_L = RectMesh2D(LX, LY, nex_L, ney_L, P_ORDER)
+    ops_L  = assemble_2d_operators(mesh_L)
+    rec_L  = mesh_L.nearest_node(REC_X, REC_Y)
+    dt_L   = 0.15 * mesh_L.hx / (C_AIR * P_ORDER**2)
+    dt_L   = round(dt_L, 8)
+    print(f"\n  Large mesh: {nex_L}x{ney_L}, N_dof={mesh_L.N_dof}, dt={dt_L:.2e}")
+    nrb_L, sp_L, er_L, _ = _run_speedup_sweep(
+        mesh_L, ops_L, 'PR', {}, SRC_X, SRC_Y, SIGMA, dt_L, 0.05, rec_L,
+        "large", nrb_list)
+
+    # --- Plot both ---
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-    ax1.plot(nrb_list, speedups, 'bo-')
-    ax1.set(xlabel='N_rb', ylabel='Speedup', title='Speedup vs ROM size')
-    ax1.grid(True, alpha=0.3)
 
-    ax2.semilogy(nrb_list, errors, 'rs-')
-    ax2.set(xlabel='N_rb', ylabel='Error (L∞)', title='Error vs ROM size')
-    ax2.grid(True, alpha=0.3)
+    if nrb_s:
+        ax1.plot(nrb_s, sp_s, 'bo-', label=f'N={mesh_s.N_dof}')
+    if nrb_L:
+        ax1.plot(nrb_L, sp_L, 'rs-', label=f'N={mesh_L.N_dof}')
+    ax1.set(xlabel='N_rb', ylabel='Speedup',
+            title='Speedup vs ROM size')
+    ax1.legend(fontsize=8); ax1.grid(True, alpha=0.3)
+
+    if nrb_s:
+        ax2.semilogy(nrb_s, er_s, 'bo-', label=f'N={mesh_s.N_dof}')
+    if nrb_L:
+        ax2.semilogy(nrb_L, er_L, 'rs-', label=f'N={mesh_L.N_dof}')
+    ax2.set(xlabel='N_rb', ylabel='Error (L-inf)',
+            title='Error vs ROM size')
+    ax2.legend(fontsize=8); ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     savefig('test8_speedup.png')
@@ -587,14 +638,14 @@ def test9_large_speedup():
 
     # Build PSD basis
     Psi9, sig9, Nrb9 = build_psd_basis(
-        res_fom9['snaps_p'], res_fom9['snaps_Phi'], eps_pod=1e-6)
+        res_fom9['snaps_p'], res_fom9['snaps_Phi'], eps_pod=1e-10)
     # free snapshot memory
     del res_fom9['snaps_p'], res_fom9['snaps_Phi']
     gc.collect()
     print(f"  PSD basis: Nrb_auto={Nrb9}")
 
     # Sweep ROM sizes
-    nrb_list9 = [10, 20, 40, 80, 150, 300]
+    nrb_list9 = [5, 10, 15, 20, 30, 40, 60, 80, 120, 150, 200, 300]
     nrb_list9 = [n for n in nrb_list9 if n <= Psi9.shape[1]]
     speedups9, errors9 = [], []
 

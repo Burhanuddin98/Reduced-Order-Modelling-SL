@@ -19,7 +19,7 @@ ROM: POD (p-v) and PSD cotangent-lift (p-Φ).
 
 import numpy as np
 from scipy import sparse
-from scipy.linalg import svd as cpu_svd
+from scipy.linalg import svd as cpu_svd, schur
 
 try:
     import cupy as cp
@@ -520,6 +520,22 @@ def analytical_rigid_rect(mesh, x0, y0, sigma, rx, ry, dt, T, n_modes=120):
 # ROM — Proper Orthogonal / Symplectic Decomposition
 # ---------------------------------------------------------------------------
 
+def _enrich_with_dc(U, N):
+    """Ensure the constant (DC / zero-frequency) mode is in basis U (N, Nrb).
+
+    If the uniform-pressure vector is not well-represented by U,
+    prepend it and re-orthogonalise via QR.  Returns (U_new, added).
+    """
+    e0 = np.ones(N) / np.sqrt(N)
+    proj = U.T @ e0
+    residual = np.linalg.norm(e0 - U @ proj)
+    if residual > 1e-6:
+        U_aug = np.column_stack([e0, U])
+        U_aug, _ = np.linalg.qr(U_aug, mode='reduced')
+        return U_aug, True
+    return U, False
+
+
 def build_pod_basis(snapshots, eps_pod=1e-6):
     """
     POD basis from snapshot matrix.
@@ -544,22 +560,32 @@ def build_pod_basis(snapshots, eps_pod=1e-6):
     return U[:, :Nrb], sigma, Nrb
 
 
-def build_psd_basis(snaps_p, snaps_Phi, eps_pod=1e-6):
+def build_psd_basis(snaps_p, snaps_Phi, eps_pod=1e-6, enrich_dc=True):
     """
     PSD cotangent-lift basis for p-Φ formulation.
 
     Combined snapshot: [p(t0)…p(tN), Φ(t0)…Φ(tN)]  → single SVD.
     Symplectic basis Ψ_H used for both p and Φ.
+
+    If *enrich_dc* is True, the constant-pressure (DC) mode is guaranteed
+    to be in the basis — critical for absorbing-boundary ROMs where the
+    spatial mean must be representable to decay correctly.
     """
     S_combined = np.hstack([snaps_p.T, snaps_Phi.T])   # (N, 2*Nt)
     U, sigma, _ = cpu_svd(S_combined, full_matrices=False)
     energy = np.cumsum(sigma**2) / np.sum(sigma**2)
     Nrb = int(np.searchsorted(energy, 1.0 - eps_pod) + 1)
     Nrb = max(Nrb, 1)
-    return U[:, :Nrb], sigma, Nrb
+    basis = U[:, :Nrb]
+    if enrich_dc:
+        basis, added = _enrich_with_dc(basis, basis.shape[0])
+        if added:
+            Nrb = basis.shape[1]
+    return basis, sigma, Nrb
 
 
-def build_modified_psd_basis(snaps_p, snaps_Phi, snaps_pb, eps_pod=1e-6):
+def build_modified_psd_basis(snaps_p, snaps_Phi, snaps_pb, eps_pod=1e-6,
+                             enrich_dc=True):
     """
     Modified PSD basis enriched with boundary pressure (stable ROM).
     """
@@ -568,17 +594,48 @@ def build_modified_psd_basis(snaps_p, snaps_Phi, snaps_pb, eps_pod=1e-6):
     energy = np.cumsum(sigma**2) / np.sum(sigma**2)
     Nrb = int(np.searchsorted(energy, 1.0 - eps_pod) + 1)
     Nrb = max(Nrb, 1)
-    return U[:, :Nrb], sigma, Nrb
+    basis = U[:, :Nrb]
+    if enrich_dc:
+        basis, added = _enrich_with_dc(basis, basis.shape[0])
+        if added:
+            Nrb = basis.shape[1]
+    return basis, sigma, Nrb
 
 
 # ---------------------------------------------------------------------------
 # ROM online solver  (p-Φ formulation)
 # ---------------------------------------------------------------------------
 
+def _stabilize_propagator(P, bc_type):
+    """Schur-based eigenvalue stabilization for an RK4 propagator matrix.
+
+    PR  — force all |λ| = 1  (energy conservation)
+    FI  — clip  |λ| > 1 to 1 (dissipative, no growth)
+    LR  — same as FI
+    """
+    T_s, Q = schur(P, output='complex')
+    for i in range(T_s.shape[0]):
+        mag = abs(T_s[i, i])
+        if bc_type == 'PR':
+            if mag > 1e-15:
+                T_s[i, i] /= mag
+        else:
+            if mag > 1.0:
+                T_s[i, i] /= mag
+    return np.real(Q @ T_s @ Q.conj().T)
+
+
 def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
              dt, T, rec_idx=None, Nrb_override=None):
     """
     ROM time-domain solver using p-Φ with symplectic (PSD) basis.
+
+    For PR and FI boundaries the RK4 propagator matrix is precomputed
+    and eigenvalue-stabilised via Schur decomposition — each time step
+    is then a single dense matvec (very fast, guaranteed stable).
+
+    For LR boundaries (state-dependent ADE accumulators in full boundary
+    space) explicit RK4 is retained.
 
     Psi_H : (N, Nrb) — symplectic basis (same for p and Φ)
     """
@@ -595,34 +652,13 @@ def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
     # reduced operators
     S_full = ops['S']
     B_diag = np.array(ops['B_total'].diagonal())
-
-    # K1_r = Ψ^T (ρc² M⁻¹ S) Ψ — but we precompute as Ψ^T K1_full_Ψ
-    # Since K1 = ρc² diag(M⁻¹) S:
     M_inv = ops['M_inv']
+
     K1Psi = rc2 * (M_inv[:, None] * S_full.dot(Psi))   # (N, Nrb)
     K1_r  = Psi.T @ K1Psi                               # (Nrb, Nrb)
     K2    = -1.0 / rho                                   # scalar
 
-    # boundary
     bnd_nodes = mesh.all_boundary_nodes()
-
-    if bc_type == 'FI':
-        Z = bc_params['Z']
-        # reduced boundary operator:  Ψ^T (-ρc²/Z M⁻¹ B) Ψ
-        fi_vec = -rc2 / Z * M_inv * B_diag
-        K3_r = Psi.T @ (fi_vec[:, None] * Psi)           # (Nrb, Nrb)
-
-    if bc_type == 'LR':
-        freq = np.linspace(10, 2000, 500)
-        Zs = miki_impedance(freq, bc_params['sigma_mat'], bc_params['d_mat'])
-        Ys = 1.0 / Zs
-        Y_inf, A_k, lam_k = fit_admittance_poles(freq, Ys, n_poles=4)
-        n_acc = len(lam_k)
-        Nb = len(bnd_nodes)
-        ade_phi = np.zeros((n_acc, Nb))
-        # boundary operator  (not fully reduced — goes back to N for ADE)
-        Psi_bnd = Psi[bnd_nodes, :]           # (Nb, Nrb)
-        bnd_B = B_diag[bnd_nodes]
 
     # initial conditions projected
     p0 = gaussian_pulse(mesh, x0, y0, sigma)
@@ -633,6 +669,59 @@ def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
     if rec_idx is not None:
         ir[0] = Psi[rec_idx, :] @ a_p
 
+    # ------------------------------------------------------------------
+    # PR / FI: propagator matrix approach (fast + stable)
+    # ------------------------------------------------------------------
+    if bc_type in ('PR', 'FI'):
+        A_r = np.zeros((2 * Nrb, 2 * Nrb))
+        A_r[:Nrb, Nrb:] = K1_r
+        A_r[Nrb:, :Nrb] = K2 * np.eye(Nrb)
+
+        if bc_type == 'FI':
+            Z = bc_params['Z']
+            fi_vec = -rc2 / Z * M_inv * B_diag
+            K3_r = Psi.T @ (fi_vec[:, None] * Psi)
+            A_r[:Nrb, :Nrb] += K3_r
+
+        # RK4 propagator
+        dtA = dt * A_r
+        dtA2 = dtA @ dtA
+        P = (np.eye(2 * Nrb) + dtA + dtA2 / 2.0
+             + dtA2 @ dtA / 6.0 + dtA2 @ dtA2 / 24.0)
+
+        P = _stabilize_propagator(P, bc_type)
+
+        # observation vector
+        obs = np.zeros(2 * Nrb)
+        if rec_idx is not None:
+            obs[:Nrb] = Psi[rec_idx, :]
+
+        state = np.concatenate([a_p, a_Phi])
+        for n in range(Nt):
+            state = P @ state
+            if rec_idx is not None:
+                ir[n + 1] = obs @ state
+
+        return dict(ir=ir)
+
+    # ------------------------------------------------------------------
+    # LR: explicit RK4 (ADE accumulators live in full boundary space)
+    # ------------------------------------------------------------------
+    freq = np.linspace(10, 2000, 500)
+    Zs = miki_impedance(freq, bc_params['sigma_mat'], bc_params['d_mat'])
+    Ys = 1.0 / Zs
+    Y_inf, A_k, lam_k = fit_admittance_poles(freq, Ys, n_poles=4)
+    n_acc = len(lam_k)
+    Nb = len(bnd_nodes)
+    ade_phi = np.zeros((n_acc, Nb))
+    Psi_bnd = Psi[bnd_nodes, :]
+    bnd_B = B_diag[bnd_nodes]
+
+    if bc_type == 'FI':
+        Z = bc_params['Z']
+        fi_vec = -rc2 / Z * M_inv * B_diag
+        K3_r = Psi.T @ (fi_vec[:, None] * Psi)
+
     def rhs(ap, aPhi, ade_l=None):
         dap = K1_r @ aPhi
         daPhi = K2 * ap
@@ -640,12 +729,10 @@ def rom_pphi(mesh, ops, Psi_H, bc_type, bc_params, x0, y0, sigma,
         if bc_type == 'FI':
             dap += K3_r @ ap
         elif bc_type == 'LR':
-            # reconstruct p at boundary
-            p_bnd = Psi_bnd @ ap                    # (Nb,)
+            p_bnd = Psi_bnd @ ap
             v_n = Y_inf * p_bnd
             for k in range(n_acc):
                 v_n += A_k[k] * ade_l[k]
-            # boundary contribution (project back)
             bnd_full = np.zeros(N)
             bnd_full[bnd_nodes] = bnd_B * v_n
             dap += Psi.T @ (-rc2 * M_inv * bnd_full)
@@ -937,26 +1024,31 @@ def rom_pphi_3d(mesh, ops, Psi_H, bc_type, bc_params,
     P = np.eye(2*Nrb) + dtA + dtA2/2.0 + dtA2@dtA/6.0 + dtA2@dtA2/24.0
     del dtA, dtA2, A_r
 
-    # --- Eigenvalue stabilization ---
-    eigs, V = np.linalg.eig(P)
+    # --- Eigenvalue stabilization via Schur decomposition ---
+    # Schur is numerically robust: P = Q T Q^H with unitary Q (cond=1).
+    # Eigenvalues sit on the diagonal of T.  Modifying them in-place
+    # avoids the ill-conditioned inv(V) that plagues eig-based methods.
+    T_s, Q = schur(P, output='complex')
+    eigs = np.diag(T_s)
     spectral_radius = np.max(np.abs(eigs))
     n_unstable = np.sum(np.abs(eigs) > 1.0 + 1e-14)
 
-    if n_unstable > 0:
-        # Project unstable eigenvalues onto the unit circle (PR)
-        # or just inside it (FI — preserve damping direction)
-        if bc_type == 'PR':
-            # For conservative system: all |λ| should be exactly 1
-            eigs_fixed = eigs / np.abs(eigs)    # project onto unit circle
-        else:
-            # For damped system: |λ| should be <= 1
-            # Clip magnitudes to 1, preserving phase (damping direction)
-            mags = np.abs(eigs)
-            eigs_fixed = np.where(mags > 1.0, eigs / mags, eigs)
+    if bc_type == 'PR':
+        # Conservative system: force ALL |λ| to exactly 1
+        for i in range(T_s.shape[0]):
+            mag = abs(T_s[i, i])
+            if mag > 1e-15:
+                T_s[i, i] /= mag
+    else:
+        # Dissipative system: clip any |λ| > 1 to the unit circle
+        for i in range(T_s.shape[0]):
+            mag = abs(T_s[i, i])
+            if mag > 1.0:
+                T_s[i, i] /= mag
 
-        # Reconstruct stabilized propagator: P = V diag(λ_fixed) V^{-1}
-        P = np.real(V @ np.diag(eigs_fixed) @ np.linalg.inv(V))
-        sr_new = np.max(np.abs(eigs_fixed))
+    P = np.real(Q @ T_s @ Q.conj().T)
+    sr_new = np.max(np.abs(np.diag(T_s)))
+    if n_unstable > 0:
         print(f" stabilized ({n_unstable} modes, "
               f"rho {spectral_radius:.8f}->{sr_new:.8f})", end='')
 
