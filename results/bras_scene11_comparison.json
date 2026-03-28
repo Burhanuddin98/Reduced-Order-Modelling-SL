@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "name": "bras_scene11_comparison",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-28T20:24:36.283956+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "room": "Auditorium Maximum TU Berlin (BRAS Scene 11)",
+    "measured_mean": {
+      "T30": 1.956,
+      "EDT": 1.29,
+      "C80": 0.6
+    },
+    "simulated": {
+      "T30": 1.489,
+      "EDT": 1.66,
+      "C80": -1.1,
+      "D50": 0.169
+    },
+    "error_T30_pct": 23.9,
+    "note": "Material assignment approximate - surface ratios estimated from photos, exact geometry from SketchUp not used",
+    "comparison_with_scene9": {
+      "scene9_error": 8.8,
+      "scene11_error": 23.9,
+      "scene9_had_measured_absorption": true,
+      "scene11_had_estimated_surfaces": true
+    }
+  }
+}
