@@ -140,26 +140,21 @@ def modal_ir(mesh, ops, eigenvalues, eigenvectors, bc_type, bc_params,
     for i in range(n_modes):
         if abs(modal_amplitudes[i]) < 1e-30:
             continue
+        # Skip DC mode (eigenvalue=0, constant pressure offset)
+        if eigenvalues[i] < 1e-10 and gamma[i] < 1e-10:
+            continue
 
         A = modal_amplitudes[i] * phi_rec[i]
 
         if bc_type == 'PR':
-            # Undamped: p_i(t) = A * cos(omega_i * t)
             if omega[i] > 0:
                 ir += A * np.cos(omega[i] * t)
-            else:
-                ir += A  # DC mode
         else:
-            # Damped: p_i(t) = A * exp(-gamma_i * t) * cos(omega_d_i * t)
             g = gamma[i]
             omega_d = np.sqrt(max(omega[i]**2 - g**2, 0))
             if omega_d > 0:
                 ir += A * np.exp(-g * t) * np.cos(omega_d * t)
             elif omega[i] > 0:
-                # Overdamped
-                ir += A * np.exp(-g * t)
-            else:
-                # DC mode with damping
                 ir += A * np.exp(-g * t)
 
     # Modal info for diagnostics
