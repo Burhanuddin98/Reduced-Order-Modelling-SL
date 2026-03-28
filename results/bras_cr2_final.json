@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "name": "bras_cr2_final",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-28T11:53:14.108074+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "method": "P4 hex fine mesh + GPU + diffuse Z + sigma=0.5",
+    "mesh": {
+      "N_dof": 136213,
+      "P": 4
+    },
+    "sigma": 0.5,
+    "measured": {
+      "T30_bb": 1.677128244785972,
+      "T30_125": NaN,
+      "T30_250": 1.6879965040549638
+    },
+    "simulated": {
+      "T30_bb": 1.025460592093056,
+      "T30_125": NaN,
+      "T30_250": 0.027096196306539783
+    },
+    "pr_floor": {
+      "T30_125": NaN,
+      "T30_250": 0.026944373106058767
+    },
+    "fom_time_gpu": 78.05771169999207
+  }
+}
