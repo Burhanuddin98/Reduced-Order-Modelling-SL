@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "name": "bras_cr2_modal_convergence",
+    "suite": "bras_benchmark",
+    "timestamp": "2026-03-28T20:03:39.966970+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "method": "Modal ROM with normal-incidence Z at 500 Hz",
+    "measured_T30": 1.677,
+    "convergence": [
+      {
+        "mesh": "10x8x4",
+        "N_dof": 23001,
+        "n_modes": 150,
+        "f_max_Hz": 180,
+        "T30": 1.918,
+        "error_pct": 14.4,
+        "eigenmode_time_s": 43
+      },
+      {
+        "mesh": "15x12x5",
+        "N_dof": 62769,
+        "n_modes": 400,
+        "f_max_Hz": 257,
+        "T30": 1.825,
+        "error_pct": 8.8,
+        "eigenmode_time_s": 457
+      }
+    ],
+    "synthesis_time_s": 0.23,
+    "note": "More modes = better accuracy. 400 modes at 257 Hz gives 8.8% error."
+  }
+}
