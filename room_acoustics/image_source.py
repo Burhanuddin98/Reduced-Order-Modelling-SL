@@ -218,3 +218,105 @@ def image_source_ir_octave_bands(Lx, Ly, Lz, src, rec, alpha_per_band,
         ir_total += ir_filtered
 
     return ir_total
+
+
+def hybrid_ism_diffuse(Lx, Ly, Lz, src, rec, alpha_walls, scatter_walls,
+                       max_order=50, sr=44100, T=3.5, c=343.0):
+    """
+    ISM with scattered energy feeding a diffuse reverberant tail.
+
+    At each reflection:
+    - Specular path keeps (1-alpha)*(1-s) of energy
+    - Scattered energy s*(1-alpha) is injected into a diffuse pool
+      at the arrival time of that reflection
+
+    The diffuse pool decays exponentially from each injection point
+    with the Eyring decay rate, producing the late reverberant tail.
+
+    Returns
+    -------
+    ir : full impulse response (specular + diffuse)
+    ir_specular : specular-only component
+    ir_diffuse : diffuse tail component
+    """
+    n_samples = int(T * sr)
+    dt = 1.0 / sr
+
+    # Compute specular ISM with scattering
+    ir_specular, reflections = image_sources_shoebox(
+        Lx, Ly, Lz, src, rec, max_order=max_order,
+        alpha_walls=alpha_walls, scatter_walls=scatter_walls,
+        sr=sr, T=T, c=c)
+
+    # Also compute without scattering to get the energy that was scattered
+    ir_full, reflections_full = image_sources_shoebox(
+        Lx, Ly, Lz, src, rec, max_order=max_order,
+        alpha_walls=alpha_walls, scatter_walls=None,
+        sr=sr, T=T, c=c)
+
+    # The scattered energy at each sample = full_energy - specular_energy
+    # This is the energy removed from specular paths by scattering
+    diffuse_injection = ir_full**2 - ir_specular**2
+    diffuse_injection = np.maximum(diffuse_injection, 0)
+
+    # Eyring decay rate for the diffuse tail
+    V = Lx * Ly * Lz
+    S_total = 2 * (Lx*Ly + Lx*Lz + Ly*Lz)
+
+    # Mean absorption (area-weighted)
+    areas = {'x0': Ly*Lz, 'x1': Ly*Lz, 'y0': Lx*Lz, 'y1': Lx*Lz,
+             'z0': Lx*Ly, 'z1': Lx*Ly}
+    mean_alpha = sum(alpha_walls.get(k, 0) * areas[k] for k in areas) / S_total
+    mean_scatter = sum(scatter_walls.get(k, 0) * areas[k] for k in areas) / S_total
+
+    # Effective absorption for diffuse field includes scattering effect
+    # Scattered energy bounces diffusely, seeing mean_alpha on average
+    alpha_eff = mean_alpha + mean_scatter * (1 - mean_alpha) * 0.5
+    alpha_eff = min(alpha_eff, 0.99)
+
+    if alpha_eff > 0 and alpha_eff < 1:
+        T60_diffuse = 0.161 * V / (-S_total * np.log(1 - alpha_eff))
+    else:
+        T60_diffuse = 0.161 * V / (S_total * max(alpha_eff, 0.01))
+
+    decay_rate = 6.91 / max(T60_diffuse, 0.01)
+
+    # Build diffuse tail: convolve injection energy with exponential decay
+    # For efficiency, use the cumulative approach:
+    # At each sample n, the diffuse energy = sum of all previous injections
+    # each decayed by exp(-decay_rate * (t_n - t_inject))
+    t = np.arange(n_samples) * dt
+    ir_diffuse = np.zeros(n_samples)
+
+    # Create the decay kernel (truncate when negligible)
+    kernel_len = min(n_samples, int(5 * T60_diffuse * sr))
+    kernel = np.exp(-decay_rate * np.arange(kernel_len) * dt)
+    kernel /= np.sqrt(np.sum(kernel**2) * dt)  # normalize
+
+    # Modulate with noise for diffuse character
+    np.random.seed(42)
+    noise = np.random.randn(n_samples)
+
+    # Convolve: at each time where specular energy was scattered,
+    # inject decaying noise into the diffuse tail
+    # Use a simplified approach: shape the noise envelope by the
+    # accumulated scattered energy convolved with exponential decay
+    from scipy.signal import fftconvolve
+
+    # Energy envelope of diffuse injection
+    envelope = fftconvolve(diffuse_injection, kernel[:kernel_len], mode='full')[:n_samples]
+    envelope = np.sqrt(np.maximum(envelope, 0))
+
+    ir_diffuse = noise * envelope
+
+    # Scale: the diffuse tail should carry the scattered energy
+    # Total specular energy
+    E_spec = np.sum(ir_specular**2)
+    E_full = np.sum(ir_full**2)
+    E_scattered = max(E_full - E_spec, 0)
+    E_diffuse = np.sum(ir_diffuse**2)
+    if E_diffuse > 0 and E_scattered > 0:
+        ir_diffuse *= np.sqrt(E_scattered / E_diffuse)
+
+    ir = ir_specular + ir_diffuse
+    return ir, ir_specular, ir_diffuse
