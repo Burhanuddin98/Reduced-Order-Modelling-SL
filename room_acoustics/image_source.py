@@ -16,8 +16,8 @@ import numpy as np
 
 
 def image_sources_shoebox(Lx, Ly, Lz, src, rec, max_order=20,
-                          alpha_walls=None, sr=44100, T=2.0,
-                          c=343.0):
+                          alpha_walls=None, scatter_walls=None,
+                          sr=44100, T=2.0, c=343.0):
     """
     Compute impulse response for a shoebox room using image sources.
 
@@ -29,10 +29,11 @@ def image_sources_shoebox(Lx, Ly, Lz, src, rec, max_order=20,
     max_order : int — maximum reflection order (total across all axes)
     alpha_walls : dict or None
         Absorption coefficients per wall. Keys: 'x0','x1','y0','y1','z0','z1'
-        (x0 = wall at x=0, x1 = wall at x=Lx, etc.)
-        If None, all walls are rigid (alpha=0).
-        Can be a dict of arrays for frequency-dependent absorption,
-        keyed by octave-band center frequency.
+    scatter_walls : dict or None
+        Scattering coefficients per wall. Same keys as alpha_walls.
+        At each reflection, specular energy is multiplied by (1-s)
+        in addition to (1-alpha). Scattered energy is lost from the
+        specular path (goes into diffuse field).
     sr : int — sample rate [Hz]
     T : float — IR duration [s]
     c : float — speed of sound [m/s]
@@ -45,9 +46,11 @@ def image_sources_shoebox(Lx, Ly, Lz, src, rec, max_order=20,
     sx, sy, sz = src
     rx, ry, rz = rec
 
-    # Default: rigid walls
+    # Default: rigid walls, no scattering
     if alpha_walls is None:
         alpha_walls = {k: 0.0 for k in ['x0','x1','y0','y1','z0','z1']}
+    if scatter_walls is None:
+        scatter_walls = {k: 0.0 for k in ['x0','x1','y0','y1','z0','z1']}
 
     n_samples = int(T * sr)
     ir = np.zeros(n_samples)
@@ -139,12 +142,17 @@ def image_sources_shoebox(Lx, Ly, Lz, src, rec, max_order=20,
                 n_hits_z1 = abs_nz - n_hits_z0
 
                 # Reflection coefficient product
-                r_total = ((1 - alpha_walls.get('x0', 0))**n_hits_x0 *
-                           (1 - alpha_walls.get('x1', 0))**n_hits_x1 *
-                           (1 - alpha_walls.get('y0', 0))**n_hits_y0 *
-                           (1 - alpha_walls.get('y1', 0))**n_hits_y1 *
-                           (1 - alpha_walls.get('z0', 0))**n_hits_z0 *
-                           (1 - alpha_walls.get('z1', 0))**n_hits_z1)
+                # Each reflection: energy *= (1-alpha) * (1-scatter)
+                # (1-alpha) = energy not absorbed
+                # (1-scatter) = fraction that stays in specular path
+                def _refl(wall, n_hits):
+                    a = alpha_walls.get(wall, 0)
+                    s = scatter_walls.get(wall, 0)
+                    return ((1 - a) * (1 - s)) ** n_hits
+
+                r_total = (_refl('x0', n_hits_x0) * _refl('x1', n_hits_x1) *
+                           _refl('y0', n_hits_y0) * _refl('y1', n_hits_y1) *
+                           _refl('z0', n_hits_z0) * _refl('z1', n_hits_z1))
 
                 amp *= np.sqrt(r_total)  # pressure reflection = sqrt(energy)
 
@@ -165,6 +173,7 @@ def image_sources_shoebox(Lx, Ly, Lz, src, rec, max_order=20,
 
 
 def image_source_ir_octave_bands(Lx, Ly, Lz, src, rec, alpha_per_band,
+                                  scatter_per_band=None,
                                   max_order=20, sr=44100, T=2.0, c=343.0):
     """
     Compute frequency-dependent IR using per-band image sources.
@@ -173,7 +182,8 @@ def image_source_ir_octave_bands(Lx, Ly, Lz, src, rec, alpha_per_band,
     ----------
     alpha_per_band : dict
         Maps octave-band center frequency -> dict of wall alphas.
-        e.g. {250: {'x0':0.05, 'x1':0.03, ...}, 500: {...}, ...}
+    scatter_per_band : dict or None
+        Maps octave-band center frequency -> dict of wall scattering coeffs.
 
     Returns
     -------
@@ -189,9 +199,11 @@ def image_source_ir_octave_bands(Lx, Ly, Lz, src, rec, alpha_per_band,
 
     for fc in bands:
         alpha_w = alpha_per_band[fc]
+        scatter_w = scatter_per_band[fc] if scatter_per_band else None
         ir_band, _ = image_sources_shoebox(Lx, Ly, Lz, src, rec,
                                             max_order=max_order,
                                             alpha_walls=alpha_w,
+                                            scatter_walls=scatter_w,
                                             sr=sr, T=T, c=c)
         # Bandpass filter
         fl = fc / np.sqrt(2)

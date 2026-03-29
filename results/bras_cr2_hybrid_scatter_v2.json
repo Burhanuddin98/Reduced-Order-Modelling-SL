@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "name": "bras_cr2_hybrid_scatter_v2",
+    "suite": "hybrid_test",
+    "timestamp": "2026-03-29T18:12:53.418453+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "method": "Modal(0-300Hz)+ISM_scatter(300Hz+)",
+    "measured": {
+      "T30": 1.677128244785972
+    },
+    "no_scatter": {
+      "T30": 1.8937724663360138,
+      "err": 12.917570389954818
+    },
+    "scatter": {
+      "T30": 1.8545683172943868,
+      "err": 10.579994288454595
+    },
+    "scatter_coeffs_1kHz": {
+      "x0": 0.014,
+      "x1": 0.018,
+      "y0": 0.027,
+      "y1": 0.027,
+      "z0": 0.009,
+      "z1": 0.07
+    }
+  }
+}

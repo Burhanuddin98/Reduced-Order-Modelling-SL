@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "name": "bras_cr2_hybrid_scatter",
+    "suite": "hybrid_test",
+    "timestamp": "2026-03-29T18:05:34.677271+00:00",
+    "version": "1.0"
+  },
+  "results": {
+    "method": "Modal ROM (0-300Hz) + ISM with scattering (300Hz+)",
+    "measured": {
+      "T30": 1.677128244785972,
+      "EDT": 1.2030922653834766,
+      "C80": 1.800799878542749,
+      "D50": 0.400187046519518
+    },
+    "no_scatter": {
+      "T30": NaN,
+      "error": NaN
+    },
+    "with_scatter": {
+      "T30_s": NaN,
+      "T30_R2": 0.0,
+      "T20_s": NaN,
+      "T20_R2": 0.0,
+      "EDT_s": NaN,
+      "EDT_R2": 0.0,
+      "C80_dB": NaN,
+      "D50": NaN,
+      "TS_ms": NaN
+    },
+    "error_T30_scatter": NaN
+  }
+}
