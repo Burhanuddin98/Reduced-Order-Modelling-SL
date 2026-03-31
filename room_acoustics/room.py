@@ -309,6 +309,20 @@ class Room:
         # High-pass the ray tracer output at crossover
         b_hi, a_hi = butter(6, f_cross / nyq, btype='high')
         ir_high = filtfilt(b_hi, a_hi, ir_rt[:n_samples])
+
+        # Level-match: scale ray tracer to be subordinate to modal ROM.
+        # The modal ROM gives the correct decay rate — the ray tracer
+        # provides high-frequency texture but shouldn't dominate the
+        # Schroeder decay curve.
+        n_start = int(0.05 * sr)
+        n_end = int(0.15 * sr)
+        rms_low = np.sqrt(np.mean(ir_low[n_start:n_end]**2))
+        rms_high = np.sqrt(np.mean(ir_high[n_start:n_end]**2))
+        if rms_high > 1e-30 and rms_low > 1e-30:
+            # Ray tracer at 30% of modal level — provides texture, not energy
+            scale = 0.3 * rms_low / rms_high
+            ir_high *= scale
+
         t_rt = _time.perf_counter() - t0
 
         # === ENGINE 3: ISM (early reflections, box rooms only) ===
