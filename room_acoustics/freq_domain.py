@@ -56,14 +56,16 @@ def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
     """
     Compute the transfer function H(f) between source and receiver.
 
-    Uses preconditioned GMRES with LU-factored stiffness matrix as
-    preconditioner. The LU factorization is done once; each frequency
-    only requires a few GMRES iterations since the diagonal shift
-    (omega^2 * M) is a small perturbation of S at low frequencies.
+    Uses splu (sparse LU) per frequency. The system matrix has the same
+    sparsity pattern at every frequency (only diagonal changes), so
+    scipy's internal symbolic analysis is reused across calls.
 
-    For frequency-independent impedance, the damping matrix is also
-    precomputed and the preconditioner includes it.
+    For maximum speed, the matrix is built by modifying the diagonal
+    of a pre-allocated CSC matrix in-place, avoiding repeated sparse
+    matrix construction.
     """
+    import time as _time
+
     N = mesh.N_dof
     S = ops['S']
     M_diag = ops['M_diag']
@@ -73,22 +75,32 @@ def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
     f_rhs = _setup_source(mesh, src_pos, sigma, M_diag)
     H = np.zeros(len(freqs), dtype=complex)
 
-    # Check if damping is frequency-independent
     freq_dep = 'Z_func' in bc_params
     if not freq_dep:
         C_diag_base = _get_damping(bc_params, 0, rc2, B_diag, N)
 
-    # Strategy: use scipy.sparse.linalg.splu for symbolic factorization
-    # reuse. For frequency-independent damping, factor once per frequency
-    # using direct LU. The key optimization: convert to complex CSC once,
-    # then update the diagonal in-place for each frequency.
+    # Build template CSC matrix with S's structure
+    # We'll modify the diagonal values in-place for each frequency
+    S_csc = S.tocsc().astype(complex).copy()
 
-    # Pre-convert S to complex CSC
-    S_csc = S.tocsc().astype(complex)
+    # Find diagonal entry positions in CSC data array
+    diag_indices = np.empty(N, dtype=np.intp)
+    indptr = S_csc.indptr
+    indices = S_csc.indices
+    for col in range(N):
+        start, end = indptr[col], indptr[col + 1]
+        row_slice = indices[start:end]
+        diag_pos = np.searchsorted(row_slice, col)
+        if diag_pos < len(row_slice) and row_slice[diag_pos] == col:
+            diag_indices[col] = start + diag_pos
+        else:
+            diag_indices[col] = -1  # no diagonal entry — shouldn't happen for S
 
-    if not freq_dep:
-        C_diag_base_arr = C_diag_base
+    # Store original diagonal values from S
+    S_diag_orig = np.array([S_csc.data[diag_indices[i]] if diag_indices[i] >= 0
+                            else 0.0 for i in range(N)], dtype=complex)
 
+    t_start = _time.perf_counter()
     print(f"  Solving {len(freqs)} frequencies (N={N})...", end='', flush=True)
 
     for i, freq in enumerate(freqs):
@@ -98,21 +110,35 @@ def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
         if freq_dep:
             C_diag = _get_damping(bc_params, freq, rc2, B_diag, N)
         else:
-            C_diag = C_diag_base_arr
+            C_diag = C_diag_base
 
-        # A = S - k2*M + i*omega*C (all shifts are diagonal)
-        diag_shift = -k2 * M_diag + 1j * omega * C_diag
-        A = S_csc + sparse.diags(diag_shift, format='csc')
+        # Update diagonal in-place: S_diag + (-k2*M + i*omega*C)
+        new_diag = S_diag_orig + (-k2 * M_diag + 1j * omega * C_diag)
+        for j in range(N):
+            if diag_indices[j] >= 0:
+                S_csc.data[diag_indices[j]] = new_diag[j]
 
+        # splu: LU factorization. scipy reuses symbolic analysis when
+        # the sparsity pattern hasn't changed.
         try:
-            p = spsolve(A, f_rhs)
+            lu = sparse.linalg.splu(S_csc)
+            p = lu.solve(f_rhs)
             H[i] = p[rec_idx]
         except Exception:
-            H[i] = 0.0
+            # Fallback to spsolve
+            try:
+                p = spsolve(S_csc, f_rhs)
+                H[i] = p[rec_idx]
+            except Exception:
+                H[i] = 0.0
 
         if (i + 1) % max(1, len(freqs) // 10) == 0:
-            print(f" {i+1}/{len(freqs)}", end='', flush=True)
+            elapsed = _time.perf_counter() - t_start
+            rate = elapsed / (i + 1)
+            print(f" {i+1}/{len(freqs)} ({rate:.2f}s/freq)", end='', flush=True)
 
+    elapsed = _time.perf_counter() - t_start
+    print(f" done ({elapsed:.1f}s total, {elapsed/len(freqs):.2f}s/freq)")
     return H
 
 
