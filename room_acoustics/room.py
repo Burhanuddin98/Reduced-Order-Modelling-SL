@@ -299,11 +299,8 @@ class Room:
             mat = get_material(self._materials.get(label, self._default_material))
             self._rt_mesh.set_alpha(label, impedance_to_alpha(mat['Z']))
 
-        from .ray_tracer import trace_rays, reflectogram_to_ir
-        reflecto, _ = trace_rays(self._rt_mesh, source, receiver,
-                                  n_rays=n_rays, max_order=max_bounces,
-                                  capture_radius=0.3, scatter_coeff=0.15,
-                                  T=T)
+        from .ray_tracer import reflectogram_to_ir
+        reflecto = self._ray_trace_c(source, receiver, n_rays, max_bounces, T)
         ir_rt = reflectogram_to_ir(reflecto, sr)
 
         # High-pass the ray tracer output at crossover
@@ -464,6 +461,64 @@ class Room:
             mat = get_material(self._materials.get(label, self._default_material))
             alpha[wall] = impedance_to_alpha(mat['Z'])
         return alpha
+
+    def _ray_trace_c(self, source, receiver, n_rays, max_bounces, T):
+        """Run the C ray tracer. Falls back to Python if DLL not found."""
+        import ctypes
+        from .materials import get_material
+        from .acoustics_metrics import impedance_to_alpha
+
+        rt = self._rt_mesh
+        n_tris = rt.n_triangles
+        sr = self.sr
+        n_bins = int(T * sr)
+
+        # Build per-triangle alpha and scatter arrays
+        tri_alpha = np.zeros(n_tris, dtype=np.float64)
+        tri_scatter = np.zeros(n_tris, dtype=np.float64)
+        for i in range(n_tris):
+            label = rt.surface_labels[i]
+            tri_alpha[i] = rt.surface_alpha.get(label, 0.05)
+            tri_scatter[i] = 0.15
+
+        verts = np.ascontiguousarray(rt.vertices.ravel(), dtype=np.float64)
+        tris = np.ascontiguousarray(rt.triangles.ravel(), dtype=np.int32)
+        reflecto = np.zeros(n_bins, dtype=np.float64)
+
+        def _ptr(arr, dt=ctypes.c_double):
+            return arr.ctypes.data_as(ctypes.POINTER(dt))
+
+        try:
+            dll_dir = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), 'engine', 'lib')
+            os.add_dll_directory(dll_dir)
+            lib = ctypes.CDLL(os.path.join(dll_dir, 'ray_tracer.dll'))
+            lib.ray_trace.restype = ctypes.c_int
+
+            n_out = ctypes.c_int(0)
+            lib.ray_trace(
+                n_tris,
+                _ptr(verts), _ptr(tris, ctypes.c_int),
+                _ptr(tri_alpha), _ptr(tri_scatter),
+                ctypes.c_double(source[0]), ctypes.c_double(source[1]),
+                ctypes.c_double(source[2]),
+                ctypes.c_double(receiver[0]), ctypes.c_double(receiver[1]),
+                ctypes.c_double(receiver[2]),
+                ctypes.c_double(0.3),
+                n_rays, max_bounces,
+                ctypes.c_double(343.0), sr, ctypes.c_double(T),
+                _ptr(reflecto), ctypes.byref(n_out),
+            )
+            return reflecto
+
+        except (OSError, AttributeError) as e:
+            print(f"  C ray tracer not available ({e}), using Python fallback")
+            from .ray_tracer import trace_rays
+            reflecto_py, _ = trace_rays(rt, source, receiver,
+                                         n_rays=n_rays, max_order=max_bounces,
+                                         capture_radius=0.3, scatter_coeff=0.15,
+                                         T=T)
+            return reflecto_py
 
     def _ism_component(self, source, receiver, f_cross, T, n_samples):
         """High-frequency IR via ISM early + Eyring late per band."""
