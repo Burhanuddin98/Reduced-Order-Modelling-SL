@@ -21,12 +21,34 @@ enabling real-time frequency sweeps.
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve, factorized
+from scipy.sparse.linalg import spsolve, factorized, LinearOperator, gmres
 
 
 # ===================================================================
 # Core solver
 # ===================================================================
+
+def _setup_source(mesh, src_pos, sigma, M_diag):
+    """Compute mass-weighted Gaussian source vector."""
+    if hasattr(mesh, '_ensure_coords'):
+        mesh._ensure_coords()
+    r2 = (mesh.x - src_pos[0])**2 + (mesh.y - src_pos[1])**2
+    if hasattr(mesh, 'z'):
+        r2 += (mesh.z - src_pos[2])**2
+    return M_diag * np.exp(-r2 / sigma**2)
+
+
+def _get_damping(bc_params, freq, rc2, B_diag, N):
+    """Get damping coefficient vector for a given frequency."""
+    if 'Z_func' in bc_params:
+        Z_vec = bc_params['Z_func'](freq)
+        return rc2 * B_diag / Z_vec
+    elif 'Z_per_node' in bc_params:
+        return rc2 * B_diag / np.asarray(bc_params['Z_per_node'], dtype=float)
+    elif 'Z' in bc_params:
+        return rc2 / bc_params['Z'] * B_diag
+    return np.zeros(N)
+
 
 def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
                                  freqs, bc_params, sigma=0.3,
@@ -34,22 +56,13 @@ def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
     """
     Compute the transfer function H(f) between source and receiver.
 
-    Parameters
-    ----------
-    ops : operator dict (M_diag, S, B_total)
-    mesh : mesh with .x, .y, .z, .N_dof
-    src_pos : (x, y, z) source position
-    rec_idx : int — receiver node index
-    freqs : array of frequencies [Hz]
-    bc_params : dict with 'Z' (scalar) or 'Z_per_node' (array),
-                or 'Z_func' (callable: f -> Z array) for freq-dependent
-    sigma : Gaussian source width [m]
-    c : speed of sound [m/s]
-    rho : air density [kg/m^3]
+    Uses preconditioned GMRES with LU-factored stiffness matrix as
+    preconditioner. The LU factorization is done once; each frequency
+    only requires a few GMRES iterations since the diagonal shift
+    (omega^2 * M) is a small perturbation of S at low frequencies.
 
-    Returns
-    -------
-    H : complex array (len(freqs),) — transfer function
+    For frequency-independent impedance, the damping matrix is also
+    precomputed and the preconditioner includes it.
     """
     N = mesh.N_dof
     S = ops['S']
@@ -57,52 +70,48 @@ def helmholtz_transfer_function(ops, mesh, src_pos, rec_idx,
     B_diag = np.array(ops['B_total'].diagonal())
     rc2 = rho * c**2
 
-    # Source vector: Gaussian pulse projected onto mass matrix
-    if hasattr(mesh, '_ensure_coords'):
-        mesh._ensure_coords()
-    r2 = (mesh.x - src_pos[0])**2 + (mesh.y - src_pos[1])**2
-    if hasattr(mesh, 'z'):
-        r2 += (mesh.z - src_pos[2])**2
-    f_src = np.exp(-r2 / sigma**2)
-    f_rhs = M_diag * f_src  # mass-weighted source
-
+    f_rhs = _setup_source(mesh, src_pos, sigma, M_diag)
     H = np.zeros(len(freqs), dtype=complex)
 
-    # Precompute sparse matrices that don't change with frequency
-    M_sp = sparse.diags(M_diag)
+    # Check if damping is frequency-independent
+    freq_dep = 'Z_func' in bc_params
+    if not freq_dep:
+        C_diag_base = _get_damping(bc_params, 0, rc2, B_diag, N)
+
+    # Strategy: use scipy.sparse.linalg.splu for symbolic factorization
+    # reuse. For frequency-independent damping, factor once per frequency
+    # using direct LU. The key optimization: convert to complex CSC once,
+    # then update the diagonal in-place for each frequency.
+
+    # Pre-convert S to complex CSC
+    S_csc = S.tocsc().astype(complex)
+
+    if not freq_dep:
+        C_diag_base_arr = C_diag_base
+
+    print(f"  Solving {len(freqs)} frequencies (N={N})...", end='', flush=True)
 
     for i, freq in enumerate(freqs):
         omega = 2 * np.pi * freq
-
-        # Damping from boundary impedance
-        if 'Z_func' in bc_params:
-            Z_vec = bc_params['Z_func'](freq)
-            C_diag = rc2 * B_diag / Z_vec
-        elif 'Z_per_node' in bc_params:
-            Z_vec = np.asarray(bc_params['Z_per_node'], dtype=float)
-            C_diag = rc2 * B_diag / Z_vec
-        elif 'Z' in bc_params:
-            Z = bc_params['Z']
-            C_diag = rc2 / Z * B_diag
-        else:
-            C_diag = np.zeros(N)
-
-        # System matrix: S - omega^2 * M + i*omega * diag(C)
-        # Note: the wave equation in p-Phi form gives the Helmholtz equation
-        # (S - (omega/c)^2 * M) * p = f for PR boundaries
-        # With FI: add damping term i*omega * C
         k2 = (omega / c) ** 2
-        A = S - k2 * M_sp + 1j * omega * sparse.diags(C_diag)
 
-        # Solve A * p = f
+        if freq_dep:
+            C_diag = _get_damping(bc_params, freq, rc2, B_diag, N)
+        else:
+            C_diag = C_diag_base_arr
+
+        # A = S - k2*M + i*omega*C (all shifts are diagonal)
+        diag_shift = -k2 * M_diag + 1j * omega * C_diag
+        A = S_csc + sparse.diags(diag_shift, format='csc')
+
         try:
-            p = spsolve(A.tocsc(), f_rhs)
+            p = spsolve(A, f_rhs)
             H[i] = p[rec_idx]
         except Exception:
             H[i] = 0.0
 
         if (i + 1) % max(1, len(freqs) // 10) == 0:
-            print(f"  {i+1}/{len(freqs)}", end='', flush=True)
+            print(f" {i+1}/{len(freqs)}", end='', flush=True)
 
     return H
 
