@@ -5,230 +5,288 @@
 
 ---
 
-## What We Have (Built and Validated)
+## Current State (Honest Assessment)
 
-| Component | File | Status |
-|-----------|------|--------|
-| SEM assembly (hex, P=4) | `room_acoustics/sem.py` | Validated — eigenfrequencies match analytical |
-| SEM assembly (quad, unstructured) | `room_acoustics/unstructured_sem.py` | Validated — 2D and 3D extruded |
-| SEM assembly (tet, P=2, Numba) | `room_acoustics/tet_sem.py` | Validated — arbitrary geometry |
-| Gmsh mesh generation | `room_acoustics/geometry.py`, `gmsh_tet_import.py` | STL/OBJ import working |
-| Time-domain FOM (p-Φ, RK4) | `room_acoustics/solvers.py` | Working, GPU via CuPy |
-| Snapshot ROM (POD/PSD) | `room_acoustics/solvers.py` | 100-500x speedup |
-| Modal ROM (eigenmodes) | `room_acoustics/modal_rom.py` | 0.6% T30 error at 250 Hz |
-| Image source method | `room_acoustics/image_source.py` | Shoebox rooms, with scattering |
-| Material database | `room_acoustics/materials.py` | 22 materials, per-surface assignment |
-| ISO 3382 metrics | `room_acoustics/acoustics_metrics.py` | T30, EDT, C80, D50, TS |
-| Impedance fitting | `room_acoustics/impedance_fit.py` | Miki-to-Sabine via Paris integration |
-| Freq-domain Helmholtz | `room_acoustics/freq_domain.py` | Working, ROM gives 38,000x speedup |
-| CUDA sparse solver | `solver_core/helmholtz_gpu.cu` | Compiled, running on RTX 2060 |
-| BRAS validation | `results/bras_cr2_*.json` | Tested against measured IRs |
+### What works
+- SEM spatial discretization: hex (P=4), quad, tet (P=2) — eigenfrequencies match published benchmarks to machine precision
+- Modal ROM: 0.6% T30 error at 250 Hz on BRAS CR2. Zero numerical dispersion. 0.2s synthesis for 3.5s IR
+- Hybrid (modal + ISM + scatter): 1.7-6% error at 250-1000 Hz on BRAS CR2
+- Frequency-domain Helmholtz solver: working, ROM gives 38,000x speedup per frequency
+- CUDA solver: compiled, running on RTX 2060, correct results
+- Material database: 22 materials, per-surface assignment
+- Tet assembly: Numba-accelerated, 184K DOFs in 10 seconds
+- STL/OBJ import via Gmsh: tested on ARD test room
 
-## Best Results So Far
+### What doesn't work yet
+- **Frequency-domain ROM basis quality**: 12 basis vectors gave 63-192% error at resonances. Not enough training points
+- **High-frequency octave-band T30**: 24-33% error at 2-4 kHz (scattering model too simple)
+- **Non-shoebox validation**: zero rooms tested with modal ROM or freq-domain solver beyond rectangular boxes
+- **CUDA solver speed**: slower than scipy for N<50K (no symbolic factorization reuse)
+- **Broadband IR from single method**: no method currently gives accurate full-bandwidth results alone
+- **Auralization**: no audio output capability
 
-| Test | Method | Error |
-|------|--------|-------|
-| BRAS CR2 @ 250 Hz | Modal ROM | **0.6%** |
-| BRAS CR2 @ 500 Hz | Hybrid (modal + ISM + scatter) | **5.4%** |
-| BRAS CR2 @ 1000 Hz | Hybrid | **1.7%** |
-| BRAS CR2 broadband T30 | Hybrid | **9.0%** |
-| Eigenfrequencies (Dauge benchmark) | SEM hex | **machine precision** |
-| ROM speedup | Snapshot-based | **500x** |
-| ROM speedup | Frequency-domain | **38,000x** |
+### The one question that matters
+**Can we get <10% T30 error across 250-4000 Hz octave bands on rooms that aren't shoeboxes?**
+
+Everything else is packaging. This question is unanswered.
 
 ---
 
-## The Product: What It Should Be
+## Phase 1: Fix the Frequency-Domain Solver Speed (Day 1)
 
-A room acoustics engine where a user:
-1. Loads a 3D room geometry (STL/OBJ/polygon+extrusion)
-2. Assigns materials to surfaces from a database
-3. Places source and receiver positions
-4. Gets an impulse response with T30/EDT/C80/D50
-5. Can listen to the room (auralization)
-6. Can change materials/positions and get instant results
+### Problem
+scipy's `spsolve` redoes full LU factorization at every frequency (2.8s at N=3K, 200s at N=23K). The sparsity pattern is identical — only the diagonal changes.
+
+### Solution
+Use `scipy.sparse.linalg.splu` to pre-analyze the sparsity pattern. For each frequency, build the shifted matrix and call `splu` which reuses the symbolic analysis internally when the pattern matches.
+
+Better approach: use `sksparse.cholmod` (SuiteSparse Python wrapper) which explicitly supports analyze-once, factor-many. For symmetric positive definite systems (which ours is when we add a small imaginary shift), Cholesky is 2-3x faster than LU.
+
+### Files to change
+- `room_acoustics/freq_domain.py`: replace `spsolve` loop with `splu` or cholmod
+
+### Acceptance test
+- N=3K: <0.1s per frequency (currently 2.8s)
+- N=23K: <2s per frequency (currently 200s)
+- Results match scipy `spsolve` to machine precision
+
+### Risk
+Low. This is well-understood engineering. sksparse may need installing (`pip install scikit-sparse`), which requires SuiteSparse C library. Fallback: use `splu` from scipy directly.
 
 ---
 
-## Implementation Plan
+## Phase 2: Frequency-Domain ROM Accuracy (Days 2-4)
 
-### Phase 1: Unified Room API (1-2 days)
+### Problem
+The ROM basis from 15 training frequencies missed resonances. 12 basis vectors can't represent the sharp peaks in H(ω) near room modes.
 
-**Goal:** One class that ties everything together.
+### Root cause
+Room modes are narrow peaks in the transfer function. A basis trained at frequencies between the peaks misses the peak shape entirely. The ROM interpolates smoothly where the true response has spikes.
 
+### Solution: Adaptive greedy training
+1. Start with 10-20 logarithmically spaced training frequencies
+2. Build initial ROM basis (SVD of solution snapshots)
+3. Evaluate ROM at 500+ test frequencies
+4. At each test frequency, compute the **residual** `r = f - A_h * x_rom` (cheap — one sparse matvec)
+5. Find the frequency where the residual is largest
+6. Solve the FOM at that frequency, add the solution to the snapshot set
+7. Rebuild the basis (incremental SVD or just re-SVD)
+8. Repeat until max residual < tolerance
+
+This is the standard greedy RBM algorithm from Hesthaven & Rozza. It automatically places training points at resonances.
+
+### Files to change
+- `room_acoustics/freq_domain.py`: add `build_greedy_rom()` function
+
+### Acceptance test
+- ROM H(ω) matches FOM H(ω) to <1% at all frequencies 20-500 Hz
+- Basis size: 30-60 vectors (from ~50 FOM solves)
+- Full sweep (500 frequencies): <0.1s after training
+
+### Risk
+Medium. The residual estimator needs careful implementation. The basis might grow too large for highly resonant rooms. But the algorithm is well-established in the RBM literature.
+
+---
+
+## Phase 3: Validate on BRAS CR2 Full Bandwidth (Days 4-5)
+
+### What to do
+1. Train the greedy ROM on BRAS CR2 (shoebox, N=23K, P=4 hex)
+2. Evaluate H(ω) at 20-4000 Hz with 1 Hz resolution
+3. IFFT to get broadband IR
+4. Compute octave-band T30 at 125, 250, 500, 1000, 2000, 4000 Hz
+5. Compare against all 10 measured dodecahedron RIRs from BRAS
+6. Use frequency-dependent Z(ω) from BRAS fitted absorption data
+7. Include air absorption (ISO 9613-1 at BRAS temperature/humidity)
+
+### Materials (from BRAS CSVs)
+Use the 31 third-octave-band absorption values directly. For each frequency in the sweep, interpolate alpha(f) per surface, convert to Z(f), build the system matrix. The frequency-domain solver handles this naturally — Z changes at each frequency.
+
+### Acceptance criteria
+- T30 per octave band (250-2000 Hz): <10% error vs measured mean
+- Broadband T30: <10% error
+- C80: within 2 dB of measured
+- EDT: within 20% of measured
+
+### What this proves
+The frequency-domain ROM with frequency-dependent materials can match real measurements on a real room. This is the core validation.
+
+### Risk
+Medium-high. The 250 Hz band should work (modal ROM already proved this at 0.6%). Higher bands depend on:
+- Whether the mesh (N=23K) resolves 2-4 kHz (it doesn't — need N=100K+)
+- Whether the ROM basis captures high-frequency resonance structure
+- Whether the impedance BC model is accurate at high frequencies
+
+If N=23K doesn't resolve high frequencies, run on N=100K+ mesh (feasible if Phase 1 brings per-frequency solve to <2s).
+
+---
+
+## Phase 4: Validate on Non-Shoebox Room (Days 5-7)
+
+### Why this matters
+Every result so far is on rectangular rooms. The claim "works on arbitrary geometry" is untested for acoustic accuracy. Assembly and eigenfrequency checks pass on L-shapes and STL imports, but T30 has never been validated on non-rectangular geometry.
+
+### What to do
+
+**Test A: BRAS Scene 11 (auditorium)**
+- Already have measured RIRs (downloaded)
+- Approximate geometry as shoebox with estimated dimensions
+- Run frequency-domain ROM, compare T30
+- This tests the method on a larger room with different materials
+
+**Test B: ARD test room (STL import)**
+- Already have the mesh (9K tets, 15K DOFs)
+- No measured data — but can compare eigenfrequencies against analytical estimates
+- Run frequency-domain ROM, check if T30 is physically plausible
+- This tests the pipeline on a true arbitrary geometry
+
+**Test C: L-shaped room (extruded)**
+- Non-rectangular but we control the geometry exactly
+- No measured data — use Sabine/Eyring as reference
+- Run both modal ROM and frequency-domain ROM, compare
+- This tests whether the two ROM approaches agree on a non-trivial geometry
+
+### Acceptance criteria
+- Scene 11: T30 within 15% of measured (we had 24% with modal ROM + guessed materials)
+- ARD room: eigenfrequencies physically plausible, T30 in reasonable range
+- L-shape: modal and freq-domain ROM agree within 5%
+
+### Risk
+High for Scene 11 (we don't have exact geometry, only estimated dimensions). Medium for others.
+
+---
+
+## Phase 5: Auralization + Room API (Days 7-8)
+
+### Only build this after Phase 3 passes
+
+**Auralization** (`room_acoustics/auralize.py`):
 ```python
-from roomgui import Room
+def convolve_ir(ir, audio_path, output_path, sr=44100):
+    """Convolve impulse response with audio, write WAV."""
 
-room = Room.from_stl("concert_hall.stl", h_target=0.3)
-room.set_material("floor", "wood_floor")
-room.set_material("ceiling", "acoustic_panel")
+def save_ir_wav(ir, path, sr=44100):
+    """Save IR as WAV file."""
+```
+
+**Room API** (`room_acoustics/room.py`):
+```python
+class Room:
+    @classmethod
+    def from_stl(cls, path, h_target=0.3, P=4): ...
+
+    @classmethod
+    def from_box(cls, Lx, Ly, Lz, Nex, Ney, Nez, P=4): ...
+
+    def set_material(self, surface_label, material_name): ...
+    def build(self): ...  # mesh + operators + ROM training
+    def impulse_response(self, source, receiver): ...
+    def t30(self, source, receiver): ...
+    def sweep_receivers(self, source, receivers): ...  # batch
+```
+
+### Risk
+Low. This is wrapping working code. The hard part is already done (if Phase 3 passes).
+
+---
+
+## Phase 6: CUDA Solver Optimization (Days 8-10)
+
+### Only do this if scipy is too slow for the target mesh size
+
+Three approaches, in order of effort:
+
+**A. scikit-sparse CHOLMOD (easiest)**
+```
+pip install scikit-sparse
+```
+SuiteSparse's CHOLMOD supports analyze-once, factor-many natively. 5-10x speedup over scipy spsolve. Python, no CUDA needed.
+
+**B. Custom CUDA kernel (medium)**
+Rewrite `helmholtz_gpu.cu` to use `cusolverSpXcsrluAnalysis` + `cusolverSpDcsrluFactor` + `cusolverSpDcsrluSolve` (the three-phase API). Symbolic analysis once, numeric factor per frequency.
+
+**C. Batched GPU solve (hardest, biggest payoff)**
+Solve multiple frequencies simultaneously on GPU. cuSOLVER doesn't support this directly, but we can:
+- Use cuBLAS batched dense solve on the ROM system (r×r, trivially parallel)
+- Or use MAGMA library for batched sparse solves
+
+### Acceptance test
+- N=23K: <0.5s per frequency
+- N=100K: <5s per frequency
+- ROM training (50 frequencies): <5 minutes total
+
+---
+
+## Phase 7: Interactive Mode + Product Demo (Days 10-12)
+
+### Only after everything above works
+
+**Source/receiver sweep:**
+- Precompute eigenmodes or ROM basis (one-time)
+- Evaluate at 1000 receiver positions in <1 second
+- Generate T30 heatmap of the room
+
+**Material comparison:**
+- Change material on one surface
+- Recompute T30 in <0.5 seconds
+- A/B comparison: "carpet vs hardwood floor"
+
+**Demo script:**
+```python
+room = Room.from_stl("concert_hall.stl")
 room.set_material_default("plaster")
+room.build()
 
-room.build()  # mesh + operators + eigenmodes
+# Sweep receivers
+grid = room.receiver_grid(height=1.2, spacing=0.5)
+t30_map = room.sweep_t30(source=(3,7,1.5), receivers=grid)
+t30_map.plot()  # heatmap
+t30_map.save("t30_map.png")
 
-ir = room.impulse_response(source=(3,7,1.5), receiver=(15,7,1.2))
-print(f"T30={ir.T30:.2f}s, EDT={ir.EDT:.2f}s, C80={ir.C80:.1f}dB")
-ir.save_wav("hall_ir.wav")
-```
+# A/B comparison
+room.set_material("ceiling", "acoustic_panel")
+ir_treated = room.impulse_response((3,7,1.5), (15,7,1.2))
+ir_treated.save_wav("treated.wav", audio="speech.wav")
 
-**New file:** `room_acoustics/room.py`
-- `Room` class wrapping mesh, operators, eigenmodes, materials
-- `Room.from_stl()`, `Room.from_obj()`, `Room.from_polygon()`
-- `Room.set_material()`, `Room.set_material_default()`
-- `Room.build()` — mesh + assemble + eigensolve (cached)
-- `Room.impulse_response()` — returns `ImpulseResponse` object
-- `ImpulseResponse` — holds IR data, computes metrics on demand, saves WAV
-
-**Changes to existing files:** None. This is a wrapper layer.
-
-### Phase 2: Auralization (half day)
-
-**Goal:** Convolve IR with dry audio, write WAV.
-
-**New file:** `room_acoustics/auralize.py`
-- `convolve(ir, audio_path) -> ndarray`
-- `save_wav(ir, path, sr=44100)`
-- `play(ir, audio_path)` — optional, if sounddevice is installed
-
-**Dependencies:** scipy.io.wavfile (already used), numpy (already used)
-
-### Phase 3: Optimize CUDA Solver (2-3 days)
-
-**Goal:** 10-50x speedup on frequency-domain solves.
-
-**File:** `solver_core/helmholtz_gpu.cu`
-
-Three optimizations:
-1. **Symbolic factorization reuse** — `cusolverSpZcsrlsvchol` with
-   analysis phase done once, numeric factorization per frequency
-2. **Batch solve** — upload all frequency shifts at once, solve in
-   a loop on GPU without host-device sync per frequency
-3. **Receiver extraction on GPU** — don't transfer full solution,
-   just extract `x[rec_idx]` on device
-
-Expected result: N=23K from 200s/freq → 2-5s/freq.
-N=3K from 3.7s/freq → 0.05s/freq.
-
-### Phase 4: Full-Bandwidth Frequency-Domain ROM (2-3 days)
-
-**Goal:** Accurate IR across 20-4000 Hz from a single method.
-
-**File:** Update `room_acoustics/freq_domain.py`
-
-1. **Adaptive training frequency selection** — place training points
-   near resonances (detected from the transfer function magnitude)
-2. **Greedy basis enrichment** — add basis vectors where the ROM
-   error is largest (standard RBM approach from Sampedro Llopis)
-3. **Error estimator** — cheap residual-based estimate of ROM error
-   at untrained frequencies, used to drive the greedy algorithm
-4. **Full H(ω) → IR pipeline** — solve at 2000+ frequencies via
-   ROM, IFFT, apply air absorption in frequency domain
-
-Expected result: T30 within 5-10% across 125-4000 Hz octave bands,
-computed in <10 seconds after training.
-
-### Phase 5: Validation Suite (1-2 days)
-
-**Goal:** Automated comparison against BRAS measurements.
-
-**File:** `room_acoustics/validate_bras.py`
-
-1. Run engine on BRAS Scene 9 (seminar room) — compare T30, EDT,
-   C80, D50 per octave band against all 10 measured RIRs
-2. Run on BRAS Scene 11 (auditorium) — second room validation
-3. Generate comparison plots + JSON data
-4. Pass/fail criteria: T30 within 10% per octave band (250-2000 Hz)
-
-### Phase 6: Complex Geometry Support (1-2 days)
-
-**Goal:** Run on real-world geometries without manual setup.
-
-1. **Auto-surface labeling** — Gmsh labels surfaces by angle/area;
-   map to floor/ceiling/walls automatically based on normal direction
-2. **Mesh quality checker** — warn about degenerate elements
-3. **Default material heuristics** — "room with carpet" presets
-4. **Test on ARD room, ballroom STL, car cabin**
-
-### Phase 7: Interactive Mode (2-3 days)
-
-**Goal:** Change source/receiver position and hear the result instantly.
-
-The eigenmodes/ROM basis are precomputed. Changing source or receiver
-only requires:
-- Modal ROM: recompute modal amplitudes (dot product, <1ms)
-- Freq-domain ROM: update RHS projection (dot product, <1ms)
-
-This enables:
-- **Source/receiver sweep** — evaluate 1000 positions in 1 second
-- **Real-time material adjustment** — change wall materials,
-  recompute modal decay rates, new IR in 0.2 seconds
-- **RT60 map** — T30 at every point in the room, visualized as
-  a heatmap
-
----
-
-## Architecture
-
-```
-roomgui/
-├── room_acoustics/          ← Python engine
-│   ├── room.py              ← NEW: unified Room API
-│   ├── auralize.py          ← NEW: audio convolution + WAV
-│   ├── sem.py               ← structured hex assembly
-│   ├── unstructured_sem.py  ← unstructured hex/quad assembly
-│   ├── tet_sem.py           ← tet assembly (Numba)
-│   ├── geometry.py          ← Gmsh mesh generation
-│   ├── gmsh_tet_import.py   ← STL/OBJ import
-│   ├── solvers.py           ← time-domain FOM + ROM
-│   ├── modal_rom.py         ← eigenmode-based ROM
-│   ├── freq_domain.py       ← frequency-domain solver + ROM
-│   ├── image_source.py      ← ISM for early reflections
-│   ├── materials.py         ← material database
-│   ├── acoustics_metrics.py ← ISO 3382 metrics
-│   ├── impedance_fit.py     ← Miki parameter fitting
-│   ├── results_io.py        ← JSON data export
-│   └── visualize.py         ← pressure field plots
-├── solver_core/             ← CUDA C engine
-│   ├── helmholtz.h          ← C API
-│   ├── helmholtz_gpu.cu     ← CUDA solver
-│   ├── helmholtz_py.py      ← Python ctypes wrapper
-│   ├── build.bat            ← Windows build script
-│   └── CMakeLists.txt       ← CMake build
-├── results/                 ← validation data (JSON + PNG)
-├── THEORY.md                ← complete theory documentation
-├── PLAN.md                  ← this file
-└── README.md
+room.set_material("ceiling", "concrete")
+ir_untreated = room.impulse_response((3,7,1.5), (15,7,1.2))
+ir_untreated.save_wav("untreated.wav", audio="speech.wav")
 ```
 
 ---
 
-## Priority Order
+## Decision Points
 
-1. **Phase 1** (Room API) — makes everything usable
-2. **Phase 2** (Auralization) — makes it tangible (you can hear it)
-3. **Phase 3** (CUDA optimization) — makes full-bandwidth practical
-4. **Phase 4** (Freq-domain ROM) — the core differentiator
-5. **Phase 5** (Validation) — proves it works
-6. **Phase 6** (Complex geometry) — real-world applicability
-7. **Phase 7** (Interactive) — the product experience
+### After Phase 3:
+- If BRAS CR2 hits <10% across 250-2000 Hz → proceed to Phase 4
+- If not → investigate why. Options: finer mesh, different BC model, more ROM training
+
+### After Phase 4:
+- If non-shoebox rooms work → proceed to Phase 5 (product layer)
+- If not → the method has fundamental limitations for complex geometry. Pivot to hybrid (modal low + ray tracing high) as the product architecture
+
+### After Phase 6:
+- If CUDA gives <5s per frequency at N=100K → full-bandwidth on large rooms is feasible
+- If not → stick with smaller meshes + ROM, accept f_max limitation
 
 ---
 
-## What Makes This Different
+## What Success Looks Like
 
-**vs ODEON/CATT:** Wave-based accuracy at low frequencies (room modes,
-diffraction) that geometric acoustics cannot capture. Plus ROM for
-instant parameter sweeps.
+**Minimum viable product:**
+- Load STL → assign materials → get T30/EDT/C80 within 15% of measurement
+- Total time: <5 minutes first run, <1 second for parameter changes
+- Works on rooms up to ~2000 m³
 
-**vs Treble:** Same wave-based approach but with modal ROM for
-dispersion-free reverberation and instant source/receiver changes.
-Treble requires cloud HPC; this runs on a laptop with an RTX GPU.
+**Competitive product:**
+- T30 within 5% across 250-4000 Hz
+- Full auralization (listen to the room)
+- Source/receiver sweep in real-time
+- Works on arbitrary geometry up to ~10,000 m³
+- Total time: <10 minutes first run, instant parameter changes
 
-**vs COMSOL:** Purpose-built for room acoustics, not general PDE.
-Material database, ISO 3382 metrics, auralization built in.
-ROM for real-time parameter exploration.
-
-**The unique combination:** SEM spatial accuracy + modal ROM for
-dispersion-free T30 + frequency-domain ROM for full bandwidth +
-CUDA acceleration + simple Python API. Nobody else has all of these
-in one package.
+**Game changer:**
+- All of the above + runs on a laptop GPU
+- Cloud deployment for larger rooms
+- Material optimization: "what ceiling treatment minimizes RT60 below 2s?"
+- Real-time VR integration
