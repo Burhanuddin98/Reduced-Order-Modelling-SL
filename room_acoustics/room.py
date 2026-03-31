@@ -316,8 +316,8 @@ class Room:
         rms_low = np.sqrt(np.mean(ir_low[n_start:n_end]**2))
         rms_high = np.sqrt(np.mean(ir_high[n_start:n_end]**2))
         if rms_high > 1e-30 and rms_low > 1e-30:
-            # Ray tracer at 30% of modal level — provides texture, not energy
-            scale = 0.3 * rms_low / rms_high
+            # Ray tracer at 15% of modal level — provides texture, not energy
+            scale = 0.15 * rms_low / rms_high
             ir_high *= scale
 
         t_rt = _time.perf_counter() - t0
@@ -473,13 +473,18 @@ class Room:
         sr = self.sr
         n_bins = int(T * sr)
 
-        # Build per-triangle alpha and scatter arrays
+        # Build per-triangle alpha and scatter arrays from materials
         tri_alpha = np.zeros(n_tris, dtype=np.float64)
         tri_scatter = np.zeros(n_tris, dtype=np.float64)
         for i in range(n_tris):
             label = rt.surface_labels[i]
             tri_alpha[i] = rt.surface_alpha.get(label, 0.05)
-            tri_scatter[i] = 0.15
+            # Use per-surface scattering from material database
+            mat_name = self._materials.get(label, self._default_material)
+            mat = get_material(mat_name)
+            # Scattering: use 'scatter' key if present, else estimate
+            # from material type
+            tri_scatter[i] = mat.get('scatter', 0.02)
 
         verts = np.ascontiguousarray(rt.vertices.ravel(), dtype=np.float64)
         tris = np.ascontiguousarray(rt.triangles.ravel(), dtype=np.int32)
@@ -504,7 +509,7 @@ class Room:
                 ctypes.c_double(source[2]),
                 ctypes.c_double(receiver[0]), ctypes.c_double(receiver[1]),
                 ctypes.c_double(receiver[2]),
-                ctypes.c_double(0.3),
+                ctypes.c_double(0.1),  # tight capture radius for accuracy
                 n_rays, max_bounces,
                 ctypes.c_double(343.0), sr, ctypes.c_double(T),
                 _ptr(reflecto), ctypes.byref(n_out),
