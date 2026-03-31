@@ -209,7 +209,8 @@ class Room:
         print("Building room...")
 
         self._build_mesh()
-        print(f"  Mesh: {self.mesh.N_dof} DOFs, {self.mesh.N_el} elements")
+        n_el = getattr(self.mesh, 'N_el', 0)
+        print(f"  Mesh: {self.mesh.N_dof} DOFs, {n_el} elements")
 
         self._assemble()
         self._volume = float(self.ops['M_diag'].sum())
@@ -231,6 +232,9 @@ class Room:
         print("  Ray trace mesh...", end='', flush=True)
         from .ray_tracer import RoomMesh
         self._rt_mesh = RoomMesh(self.mesh, self.ops)
+        if self._rt_mesh.n_triangles == 0 and self._geometry_type == 'box':
+            # Box mesh doesn't have _boundary_faces — build from box geometry
+            self._rt_mesh = self._build_box_rt_mesh()
         print(f" {self._rt_mesh.n_triangles} triangles")
 
         self._built = True
@@ -461,6 +465,43 @@ class Room:
             mat = get_material(self._materials.get(label, self._default_material))
             alpha[wall] = impedance_to_alpha(mat['Z'])
         return alpha
+
+    def _build_box_rt_mesh(self):
+        """Build ray trace mesh for box rooms (6 faces = 12 triangles)."""
+        from .ray_tracer import RoomMesh
+        Lx, Ly, Lz = self._dimensions
+        # 8 vertices of the box
+        verts = np.array([
+            [0,0,0],[Lx,0,0],[Lx,Ly,0],[0,Ly,0],
+            [0,0,Lz],[Lx,0,Lz],[Lx,Ly,Lz],[0,Ly,Lz],
+        ], dtype=float)
+        # 12 triangles (2 per face)
+        tris = np.array([
+            [0,1,2],[0,2,3],  # floor
+            [4,6,5],[4,7,6],  # ceiling
+            [0,4,5],[0,5,1],  # front
+            [2,6,7],[2,7,3],  # back
+            [0,3,7],[0,7,4],  # left
+            [1,5,6],[1,6,2],  # right
+        ], dtype=int)
+        labels = ['floor','floor','ceiling','ceiling',
+                  'front','front','back','back',
+                  'left','left','right','right']
+        normals = []
+        for t in tris:
+            e1 = verts[t[1]]-verts[t[0]]
+            e2 = verts[t[2]]-verts[t[0]]
+            n = np.cross(e1,e2)
+            normals.append(n/np.linalg.norm(n))
+
+        rt = RoomMesh.__new__(RoomMesh)
+        rt.vertices = verts
+        rt.triangles = tris
+        rt.normals = np.array(normals)
+        rt.n_triangles = 12
+        rt.surface_labels = labels
+        rt.surface_alpha = {}
+        return rt
 
     def _ray_trace_c(self, source, receiver, n_rays, max_bounces, T):
         """Run the C ray tracer. Falls back to Python if DLL not found."""
