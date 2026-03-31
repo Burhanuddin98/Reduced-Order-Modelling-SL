@@ -20,6 +20,16 @@
 #ifndef HELMHOLTZ_H
 #define HELMHOLTZ_H
 
+#ifdef _WIN32
+  #ifdef HELMHOLTZ_EXPORTS
+    #define HELMHOLTZ_API __declspec(dllexport)
+  #else
+    #define HELMHOLTZ_API __declspec(dllimport)
+  #endif
+#else
+  #define HELMHOLTZ_API
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,7 +52,7 @@ typedef struct HelmholtzContext HelmholtzContext;
  *
  * @return Opaque context pointer, or NULL on failure.
  */
-HelmholtzContext* helmholtz_init(
+HELMHOLTZ_API HelmholtzContext* helmholtz_init(
     int N, int nnz,
     const int* row_ptr, const int* col_idx, const double* S_vals,
     const double* M_diag,
@@ -64,7 +74,7 @@ HelmholtzContext* helmholtz_init(
  *
  * @return 0 on success, nonzero on error.
  */
-int helmholtz_solve(
+HELMHOLTZ_API int helmholtz_solve(
     HelmholtzContext* ctx,
     double omega, double c,
     const double* C_diag,
@@ -88,7 +98,7 @@ int helmholtz_solve(
  *
  * @return 0 on success.
  */
-int helmholtz_sweep(
+HELMHOLTZ_API int helmholtz_sweep(
     HelmholtzContext* ctx,
     int n_freqs, const double* omegas, double c,
     const double* C_diag,
@@ -100,13 +110,13 @@ int helmholtz_sweep(
 /**
  * Free all resources.
  */
-void helmholtz_free(HelmholtzContext* ctx);
+HELMHOLTZ_API void helmholtz_free(HelmholtzContext* ctx);
 
 /**
  * Query info.
  */
-int helmholtz_get_N(const HelmholtzContext* ctx);
-int helmholtz_is_gpu(const HelmholtzContext* ctx);
+HELMHOLTZ_API int helmholtz_get_N(const HelmholtzContext* ctx);
+HELMHOLTZ_API int helmholtz_is_gpu(const HelmholtzContext* ctx);
 
 #ifdef __cplusplus
 }
