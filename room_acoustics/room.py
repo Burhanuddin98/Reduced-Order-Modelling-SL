@@ -227,6 +227,12 @@ class Room:
         f_max = self._frequencies[-1]
         print(f" f_max={f_max:.0f} Hz")
 
+        # Build ray tracing mesh from boundary faces
+        print("  Ray trace mesh...", end='', flush=True)
+        from .ray_tracer import RoomMesh
+        self._rt_mesh = RoomMesh(self.mesh, self.ops)
+        print(f" {self._rt_mesh.n_triangles} triangles")
+
         self._built = True
         self._build_time = _time.perf_counter() - t0
         print(f"  Build: {self._build_time:.1f}s")
@@ -235,10 +241,24 @@ class Room:
     # Impulse Response
     # ============================================================
 
-    def impulse_response(self, source, receiver, T=3.5, sigma=0.3):
+    def impulse_response(self, source, receiver, T=3.5, sigma=0.3,
+                         n_rays=2000, max_bounces=150):
         """
-        Compute hybrid IR: modal ROM (low) + ISM+Eyring (high).
-        Near-instant after build().
+        Compute hybrid IR: modal ROM (low) + ray tracing (high).
+
+        Three engines:
+          1. Modal ROM: 0 to f_cross (eigenmodes, dispersion-free)
+          2. Ray tracer: shapes the full-bandwidth late reverberant tail
+          3. ISM (box rooms only): early specular reflections
+
+        Parameters
+        ----------
+        source : (x, y, z)
+        receiver : (x, y, z)
+        T : IR duration [s]
+        sigma : source pulse width [m]
+        n_rays : rays for ray tracer (more = smoother tail)
+        max_bounces : max reflection order for ray tracer
         """
         if not self._built:
             raise RuntimeError("Call build() first")
@@ -247,13 +267,14 @@ class Room:
         dt = 1.0 / sr
         n_samples = int(T * sr)
         f_cross = float(self._frequencies[-1]) * 0.85
+        nyq = sr / 2
 
         rec_idx = self.mesh.nearest_node(*receiver)
         Z = self._build_impedance()
 
-        print(f"  IR: modal 0-{f_cross:.0f}Hz + ISM {f_cross:.0f}-20kHz")
+        print(f"  IR: modal 0-{f_cross:.0f}Hz, ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
 
-        # === Modal ROM ===
+        # === ENGINE 1: Modal ROM (low frequencies) ===
         t0 = _time.perf_counter()
         from .modal_rom import modal_ir
         res = modal_ir(self.mesh, self.ops,
@@ -265,22 +286,56 @@ class Room:
 
         # Low-pass at crossover
         from scipy.signal import butter, filtfilt
-        nyq = sr / 2
-        if f_cross < nyq * 0.95:
-            b, a = butter(6, f_cross / nyq, btype='low')
-            ir_low = filtfilt(b, a, ir_modal)
-        else:
-            ir_low = ir_modal
+        b_lo, a_lo = butter(6, f_cross / nyq, btype='low')
+        ir_low = filtfilt(b_lo, a_lo, ir_modal)
 
-        # === ISM + Eyring tail (high frequencies) ===
+        # === ENGINE 2: Ray tracer (late reverberation, all frequencies) ===
         t0 = _time.perf_counter()
-        ir_high = self._ism_component(source, receiver, f_cross, T, n_samples)
+
+        # Set material absorption on ray trace mesh
+        from .materials import get_material
+        from .acoustics_metrics import impedance_to_alpha
+        for label in self._get_labels():
+            mat = get_material(self._materials.get(label, self._default_material))
+            self._rt_mesh.set_alpha(label, impedance_to_alpha(mat['Z']))
+
+        from .ray_tracer import trace_rays, reflectogram_to_ir
+        reflecto, _ = trace_rays(self._rt_mesh, source, receiver,
+                                  n_rays=n_rays, max_order=max_bounces,
+                                  capture_radius=0.3, scatter_coeff=0.15,
+                                  T=T)
+        ir_rt = reflectogram_to_ir(reflecto, sr)
+
+        # High-pass the ray tracer output at crossover
+        b_hi, a_hi = butter(6, f_cross / nyq, btype='high')
+        ir_high = filtfilt(b_hi, a_hi, ir_rt[:n_samples])
+        t_rt = _time.perf_counter() - t0
+
+        # === ENGINE 3: ISM (early reflections, box rooms only) ===
+        t0 = _time.perf_counter()
+        ir_ism_early = np.zeros(n_samples)
+        if self._geometry_type == 'box' and self._dimensions is not None:
+            Lx, Ly, Lz = self._dimensions
+            alpha_w = self._get_wall_alpha()
+            from .image_source import image_sources_shoebox
+            ir_ism_raw, _ = image_sources_shoebox(
+                Lx, Ly, Lz, source, receiver,
+                max_order=5, alpha_walls=alpha_w, sr=sr, T=T)
+            n = min(len(ir_ism_raw), n_samples)
+            # Only keep first 80ms of ISM (early reflections)
+            n_early = min(int(0.08 * sr), n)
+            fade = int(0.02 * sr)
+            window = np.ones(n)
+            window[n_early:n_early+fade] = np.linspace(1, 0, min(fade, n-n_early))
+            window[n_early+fade:] = 0
+            ir_ism_bp = filtfilt(b_hi, a_hi, ir_ism_raw[:n] * window[:n])
+            ir_ism_early[:n] = ir_ism_bp
         t_ism = _time.perf_counter() - t0
 
-        # === Blend ===
-        ir_total = ir_low + ir_high
+        # === BLEND ===
+        ir_total = ir_low + ir_high + ir_ism_early
 
-        print(f"  Modal: {t_modal:.2f}s, ISM: {t_ism:.2f}s")
+        print(f"  Modal: {t_modal:.2f}s, Ray trace: {t_rt:.1f}s, ISM: {t_ism:.2f}s")
 
         return ImpulseResponse(ir_total, sr, ir_modal=ir_low, ir_ism=ir_high)
 
