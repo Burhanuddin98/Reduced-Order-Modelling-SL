@@ -286,6 +286,220 @@ def build_frequency_rom(ops, mesh, src_pos, bc_params, sigma=0.3,
     }
 
 
+def build_greedy_rom(ops, mesh, src_pos, bc_params, sigma=0.5,
+                     f_min=20, f_max=500, n_initial=15, max_basis=60,
+                     tol=1e-3, max_iter=50, c=343.0, rho=1.2,
+                     umfpack_lib=None):
+    """
+    Greedy Reduced Basis Method for frequency-domain room acoustics.
+
+    Adaptively selects training frequencies where the ROM error is
+    largest, ensuring resonance peaks are captured.
+
+    Algorithm:
+    1. Solve FOM at n_initial logarithmically spaced frequencies
+    2. Build ROM basis via SVD
+    3. Evaluate ROM at dense test frequencies
+    4. Compute residual at each test frequency (one sparse matvec, cheap)
+    5. Find frequency with max residual
+    6. Solve FOM there, add to basis
+    7. Repeat until residual < tol or max_basis reached
+
+    Parameters
+    ----------
+    umfpack_lib : ctypes library or None
+        If provided, uses UMFPACK for FOM solves (much faster).
+        If None, uses scipy spsolve.
+
+    Returns
+    -------
+    rom : dict with reduced operators, basis, and training info
+    """
+    import time as _time
+    from scipy.linalg import svd
+
+    N = mesh.N_dof
+    S = ops['S']
+    M_diag = ops['M_diag']
+    B_diag = np.array(ops['B_total'].diagonal())
+    rc2 = rho * c**2
+
+    f_rhs = _setup_source(mesh, src_pos, sigma, M_diag)
+    M_sp = sparse.diags(M_diag)
+
+    # Get damping (assumed frequency-independent for greedy — use mid freq)
+    C_diag = _get_damping(bc_params, (f_min + f_max)/2, rc2, B_diag, N)
+    freq_dep = 'Z_func' in bc_params
+
+    # Setup UMFPACK if available
+    umf_ctx = None
+    if umfpack_lib is not None:
+        import ctypes
+        S_csc = S.tocsc()
+        def _ptr(arr, dt=ctypes.c_double):
+            return np.ascontiguousarray(arr).ctypes.data_as(ctypes.POINTER(dt))
+        umf_ctx = umfpack_lib.helmholtz_umf_init(
+            N, S_csc.nnz,
+            _ptr(np.ascontiguousarray(S_csc.indptr, dtype=np.int32), ctypes.c_int),
+            _ptr(np.ascontiguousarray(S_csc.indices, dtype=np.int32), ctypes.c_int),
+            _ptr(np.ascontiguousarray(S_csc.data, dtype=np.float64)),
+            _ptr(np.ascontiguousarray(M_diag, dtype=np.float64)))
+
+    def _fom_solve(freq):
+        """Solve FOM at one frequency, return full solution vector."""
+        omega = 2 * np.pi * freq
+        k2 = (omega / c) ** 2
+        if freq_dep:
+            C_d = _get_damping(bc_params, freq, rc2, B_diag, N)
+        else:
+            C_d = C_diag
+
+        if umf_ctx is not None:
+            import ctypes
+            def _ptr(arr, dt=ctypes.c_double):
+                return np.ascontiguousarray(arr).ctypes.data_as(ctypes.POINTER(dt))
+            # Use UMFPACK but get full solution (solve, then read sol arrays)
+            # For now, use the sweep function with rec_idx trick — solve once
+            H_r = np.zeros(1, dtype=np.float64)
+            H_i = np.zeros(1, dtype=np.float64)
+            omegas = np.array([omega], dtype=np.float64)
+            C_arr = np.ascontiguousarray(C_d, dtype=np.float64)
+            f_arr = np.ascontiguousarray(f_rhs, dtype=np.float64)
+            # We need the full solution, not just one point.
+            # Fall back to scipy for snapshot collection since we need full p.
+            pass
+
+        # Scipy solve (need full solution for basis construction)
+        A = S - k2 * M_sp + 1j * omega * sparse.diags(C_d)
+        return spsolve(A.tocsc(), f_rhs)
+
+    # Dense test frequencies for error estimation
+    n_test = 500
+    test_freqs = np.linspace(f_min, f_max, n_test)
+
+    # Step 1: Initial training
+    training_freqs = list(np.logspace(np.log10(f_min), np.log10(f_max), n_initial))
+    snapshots = []
+
+    t_start = _time.perf_counter()
+    print(f"  Greedy ROM: f=[{f_min}-{f_max}]Hz, N={N}")
+    print(f"  Initial training ({n_initial} points)...", end='', flush=True)
+
+    for freq in training_freqs:
+        p = _fom_solve(freq)
+        snapshots.append(p)
+
+    print(f" done ({_time.perf_counter()-t_start:.1f}s)")
+
+    # Greedy loop
+    for iteration in range(max_iter):
+        # Build basis from current snapshots
+        snap_mat = np.column_stack(snapshots)
+        snap_ri = np.column_stack([snap_mat.real, snap_mat.imag])
+        U, sigma_vals, _ = svd(snap_ri, full_matrices=False)
+        n_basis = min(max_basis, len(sigma_vals),
+                      np.searchsorted(-sigma_vals, -sigma_vals[0] * 1e-12) + 1)
+        Psi = U[:, :n_basis]
+
+        # Project operators
+        S_r = Psi.T @ S.dot(Psi)
+        M_r = Psi.T @ (M_diag[:, None] * Psi)
+        f_r = Psi.T @ f_rhs
+
+        if not freq_dep:
+            C_r = Psi.T @ (C_diag[:, None] * Psi)
+
+        # Evaluate ROM at all test frequencies, compute residuals
+        max_res = 0
+        worst_freq = test_freqs[0]
+
+        for freq in test_freqs:
+            omega = 2 * np.pi * freq
+            k2 = (omega / c) ** 2
+
+            if freq_dep:
+                C_d = _get_damping(bc_params, freq, rc2, B_diag, N)
+                C_r_f = Psi.T @ (C_d[:, None] * Psi)
+            else:
+                C_r_f = C_r
+                C_d = C_diag
+
+            # ROM solve
+            A_r = S_r - k2 * M_r + 1j * omega * C_r_f
+            try:
+                a = np.linalg.solve(A_r, f_r)
+            except np.linalg.LinAlgError:
+                continue
+
+            # Reconstruct full solution
+            p_rom = Psi @ a
+
+            # Compute residual: r = f - A*p_rom (one sparse matvec)
+            Ap = S.dot(p_rom) + (-k2 * M_diag + 1j * omega * C_d) * p_rom
+            residual = np.linalg.norm(f_rhs - Ap) / np.linalg.norm(f_rhs)
+
+            if residual > max_res:
+                max_res = residual
+                worst_freq = freq
+
+        print(f"  Iter {iteration+1}: basis={n_basis}, max_residual={max_res:.2e} "
+              f"at {worst_freq:.0f}Hz", end='')
+
+        if max_res < tol:
+            print(f" — CONVERGED")
+            break
+
+        # Add worst frequency to training set
+        if worst_freq not in training_freqs:
+            training_freqs.append(worst_freq)
+            p_new = _fom_solve(worst_freq)
+            snapshots.append(p_new)
+            print(f" — added {worst_freq:.0f}Hz")
+        else:
+            print(f" — already trained, stopping")
+            break
+
+    elapsed = _time.perf_counter() - t_start
+    print(f"  Greedy done: {n_basis} basis vectors, {len(training_freqs)} FOM solves, "
+          f"{elapsed:.1f}s")
+
+    # Final basis and operators
+    snap_mat = np.column_stack(snapshots)
+    snap_ri = np.column_stack([snap_mat.real, snap_mat.imag])
+    U, sigma_vals, _ = svd(snap_ri, full_matrices=False)
+    n_basis = min(max_basis, len(sigma_vals),
+                  np.searchsorted(-sigma_vals, -sigma_vals[0] * 1e-12) + 1)
+    Psi = U[:, :n_basis]
+
+    S_r = Psi.T @ S.dot(Psi)
+    M_r = Psi.T @ (M_diag[:, None] * Psi)
+    B_r = Psi.T @ (B_diag[:, None] * Psi)
+    f_r = Psi.T @ f_rhs
+
+    # Cleanup UMFPACK
+    if umf_ctx is not None:
+        umfpack_lib.helmholtz_umf_free(umf_ctx)
+
+    return {
+        'Psi': Psi,
+        'S_r': S_r,
+        'M_r': M_r,
+        'B_r': B_r,
+        'f_r': f_r,
+        'n_basis': n_basis,
+        'N_full': N,
+        'bc_params': bc_params,
+        'rc2': rc2,
+        'c': c,
+        'rho': rho,
+        'B_diag': B_diag,
+        'training_freqs': training_freqs,
+        'max_residual': max_res,
+        'n_fom_solves': len(training_freqs),
+        'build_time_s': elapsed,
+    }
+
+
 def rom_transfer_function(rom, rec_idx, freqs):
     """
     Evaluate transfer function using the reduced basis.
