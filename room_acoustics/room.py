@@ -516,15 +516,25 @@ class Room:
 
         # Register engines based on room type
         if self._geometry_type == 'box' and self._dimensions is not None:
-            # Box room: analytical modes give exact solution at any freq
+            f_eigen_max = float(self._frequencies[-1]) if self._eigenvalues is not None else 0
+
+            # Eigensolve: exact low-freq modes (if available)
+            if self._eigenvalues is not None and self._surface_weights is not None:
+                synth.register(ModalROMProvider(
+                    self._eigenvalues, self._eigenvectors, self._frequencies,
+                    self.mesh, self.ops, self._surface_weights))
+                print(f"  Engines: modal_rom ({len(self._eigenvalues)} modes "
+                      f"up to {f_eigen_max:.0f}Hz, confidence=0.95)")
+
+            # Analytical: full bandwidth, defers to eigensolve below f_eigen_max
             from .analytical_modes import AnalyticalRoomModes
             arm = AnalyticalRoomModes(*self._dimensions, f_max=f_max_modes)
-            synth.register(AnalyticalModesProvider(arm))
-            print(f"  Engines: analytical ({arm.n_modes} modes, "
+            synth.register(AnalyticalModesProvider(arm, defer_below=f_eigen_max))
+            print(f"           analytical ({arm.n_modes} modes, "
                   f"{arm.n_axial}A+{arm.n_tangential}T+{arm.n_oblique}O "
-                  f"up to {f_max_modes}Hz)")
+                  f"up to {f_max_modes}Hz, defers below {f_eigen_max:.0f}Hz)")
         else:
-            # Non-box: use eigensolve + axial
+            # Non-box: eigensolve + axial
             if self._eigenvalues is not None:
                 synth.register(ModalROMProvider(
                     self._eigenvalues, self._eigenvectors, self._frequencies,

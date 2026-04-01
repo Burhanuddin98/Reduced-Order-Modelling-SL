@@ -291,19 +291,31 @@ class AnalyticalModesProvider:
     Provides exact analytical modes (axial + tangential + oblique)
     with Kuttruff decay formula and air absorption.
 
-    Confidence: 1.0 (exact solution for rectangular rooms).
+    When used alongside eigensolve (ModalROMProvider), set defer_below
+    to the eigensolve f_max. Modes below that frequency get reduced
+    confidence so the eigensolve modes (with exact decay rates) win
+    the merge. Above that frequency, analytical modes take over at
+    full confidence.
     """
     name = 'analytical'
-    confidence_base = 1.0
 
-    def __init__(self, arm):
+    def __init__(self, arm, defer_below=0.0):
         """
         Parameters
         ----------
         arm : AnalyticalRoomModes
             Pre-built analytical mode object.
+        defer_below : float
+            Frequency [Hz] below which confidence is reduced to 0.5
+            (to let eigensolve modes win the merge). Default 0 = no
+            deferral, analytical has full confidence everywhere.
         """
         self._arm = arm
+        self._defer_below = float(defer_below)
+
+    @property
+    def confidence_base(self):
+        return 1.0
 
     @property
     def frequency_range(self):
@@ -313,11 +325,9 @@ class AnalyticalModesProvider:
                       c=343.0, humidity=50.0, temperature=20.0, **kw):
         arm = self._arm
 
-        # Mode shapes at source and receiver
         phi_src = arm.mode_shape(*source)
         phi_rec = arm.mode_shape(*receiver)
 
-        # Normalization
         n_nonzero = ((arm.modes_n > 0).astype(int) +
                      (arm.modes_m > 0).astype(int) +
                      (arm.modes_l > 0).astype(int))
@@ -326,8 +336,14 @@ class AnalyticalModesProvider:
         amplitudes = phi_src * phi_rec * norm
         gamma = arm.compute_decay_rates(materials, humidity, temperature)
 
-        return make_modes(arm.modes_f, amplitudes, gamma,
-                          self.confidence_base, self.name)
+        # Frequency-dependent confidence: full above defer_below,
+        # reduced below (so eigensolve wins the merge there)
+        if self._defer_below > 0:
+            conf = np.where(arm.modes_f >= self._defer_below, 1.0, 0.5)
+        else:
+            conf = 1.0
+
+        return make_modes(arm.modes_f, amplitudes, gamma, conf, self.name)
 
 
 class ModalROMProvider:
