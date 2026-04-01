@@ -133,20 +133,25 @@ python validate_eigenfrequencies.py
 python test_bras_cr2.py         # BRAS benchmark
 ```
 
-## Current metrics (2026-03-31)
+## Current metrics (2026-04-01)
+
+### Broadband (BRAS CR2, 74K DOFs, hybrid platform)
+- **T30 error**: 3.0% — PASS
+- **EDT error**: 28% — needs freq-dep absorption
+- **C80 delta**: 2.7 dB — borderline
 
 ### Modal ROM (BRAS CR2, 250 Hz)
 - **T30 error**: 0.6%
 - **EDT error**: 2.5%
 - **Synthesis time**: 0.2s for 3.5s IR
 
-### Hybrid platform (BRAS CR2, 250-1000 Hz)
-- **T30 error**: 1.7-6% (octave-band dependent)
-- **EDT error**: 4.2-4.5%
-- **Total time**: ~31s (with C ray tracer)
+### Axial mode engine (verified vs measured RIRs)
+- **Spectral peak match**: 88% (35/40 predicted modes within ±3 Hz)
+- **Decay rate (coupling model)**: 28% mean error, 24% median
+- **Position dependence**: 16.4 dB spread confirmed
 
 ### Known limitations
-- High-frequency (2-4 kHz): 24-33% T30 error (ray tracer misses coherent resonances — axial mode engine planned to address this)
+- Octave-band T30 rises with frequency (20-67% error) — FI impedance lacks freq-dep absorption
 - Freq-domain ROM: 12 basis vectors gave 63-192% error at resonances
 - Non-shoebox rooms: limited validation beyond rectangular boxes
 

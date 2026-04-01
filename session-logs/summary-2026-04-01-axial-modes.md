@@ -62,6 +62,20 @@ Reduces decay rate error from 51% → 28%. Best for low-order modes (<150 Hz).
 - Modal ROM: 0.6% T30 error on BRAS CR2 at 250 Hz
 - Hybrid: 1.7-6% T30 error at 250-1000 Hz
 
+## Phase 3 first run results
+- Broadband T30: **3.0% error — PASS**
+- Octave-band T30 (250-4000 Hz): 20-67% error — FAIL
+- Root cause: FI impedance gives single alpha per surface; real materials absorb more at higher freq
+- Ray tracer + axial modes need frequency-dependent absorption per octave band
+
+## Commits this session (feature/axial-modes branch)
+- 658c71d: Axial mode engine + project documentation
+- 846327d: Phase 3 BRAS test + measured ground truth from WAVs
+- 0e5d2d7: Axial mode verification vs BRAS measured RIRs (88% spectral match)
+- db7fa0c: 3D coupling loss model (decay error 51% → 28%)
+- 0b352e0: Housekeeping: session summary, spec doc, verification plot
+- e563949: Phase 3 first run results
+
 ## Next steps
-- **Phase 3**: Run full-bandwidth validation (test_phase3_bras_fullband.py) with real BRAS absorption data
+- **Per-band absorption calibration**: inverse problem — measure per-band RT from WAVs → infer alpha per surface per band. This replaces the FI single-alpha model for high-frequency engines.
 - **Phase 2** (other PC): frequency-domain ROM greedy basis enrichment

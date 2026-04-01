@@ -20,10 +20,20 @@
 | EDT | 4.2-4.5% | Good |
 | Total time | ~31s | Acceptable |
 
+### Phase 3 first run — BRAS CR2 (74K DOFs, 200 modes)
+| Metric | Error | Status |
+|--------|-------|--------|
+| Broadband T30 | 3.0% | PASS |
+| T30 @250 Hz | 20% | FAIL |
+| T30 @500 Hz | 29% | FAIL |
+| T30 @1-2 kHz | 43-67% | FAIL |
+| EDT | 28% | FAIL |
+| C80 | 2.7 dB delta | FAIL (borderline) |
+
 ### Known weaknesses
 | Issue | Error | Root cause |
 |-------|-------|------------|
-| High-freq T30 (2-4 kHz) | 24-33% | Scattering model too simple |
+| Octave-band T30 rises with frequency | 20-67% | FI impedance: single alpha per surface, no freq-dep absorption |
 | Freq-domain ROM at resonances | 63-192% | Only 12 basis vectors, misses peaks |
 | Non-shoebox validation | Limited | Only box + STL import tested for T30 |
 
@@ -58,13 +68,17 @@ Everything else is packaging. This question drives the roadmap.
 - Risk: low (physics is exact, implementation is simple numpy)
 - Spec: `docs/axial_mode_spec.md`
 
-### Phase 3: BRAS CR2 full-bandwidth validation [NOT STARTED]
-- Train greedy ROM on BRAS CR2 (N=23K, P=4 hex)
-- Evaluate 20-4000 Hz with 1 Hz resolution
-- Compare octave-band T30 vs all 10 measured BRAS RIRs
-- Use frequency-dependent Z(f) from BRAS absorption data
+### Phase 3: BRAS CR2 full-bandwidth validation [IN PROGRESS]
+- First run complete (74K DOFs, 200 modes, 5000 rays)
+- **Broadband T30: 3.0% error — PASS**
+- Octave-band T30: 20-67% error — FAIL (T30 rises with frequency)
+- Root cause: FI impedance uses single alpha per surface; real materials
+  absorb more at higher frequencies. Ray tracer + axial modes need
+  frequency-dependent absorption.
+- **Next:** Implement per-band absorption calibration from measured RIRs
+  (inverse problem: measure per-band RT → infer per-band alpha per surface)
+- BRAS data downloaded: 10 measured RIRs, fitted absorption CSVs
 - Accept: T30 <10% per octave band (250-2000 Hz), C80 within 2 dB
-- Risk: medium-high (may need N=100K+ mesh for high frequencies)
 
 ### Phase 4: Non-shoebox validation [NOT STARTED]
 - Test A: BRAS Scene 11 (auditorium) — T30 within 15% of measured
