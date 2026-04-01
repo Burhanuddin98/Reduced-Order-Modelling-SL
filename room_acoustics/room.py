@@ -117,6 +117,7 @@ class Room:
         self._eigenvalues = None
         self._eigenvectors = None
         self._frequencies = None
+        self._parallel_pairs = None  # cached parallel surface pairs
         self._built = False
         self._build_time = 0
         self._volume = 0
@@ -237,6 +238,19 @@ class Room:
             self._rt_mesh = self._build_box_rt_mesh()
         print(f" {self._rt_mesh.n_triangles} triangles")
 
+        # Detect parallel surfaces for axial mode engine
+        from .axial_modes import detect_parallel_surfaces, detect_parallel_surfaces_box
+        if self._geometry_type == 'box' and self._dimensions is not None:
+            self._parallel_pairs = detect_parallel_surfaces_box(self._dimensions)
+        else:
+            self._parallel_pairs = detect_parallel_surfaces(self._rt_mesh)
+        n_pairs = len(self._parallel_pairs)
+        if n_pairs > 0:
+            dists = [f"{p.distance:.2f}m" for p in self._parallel_pairs]
+            print(f"  Parallel pairs: {n_pairs} ({', '.join(dists)})")
+        else:
+            print("  Parallel pairs: none detected")
+
         self._built = True
         self._build_time = _time.perf_counter() - t0
         print(f"  Build: {self._build_time:.1f}s")
@@ -276,7 +290,8 @@ class Room:
         rec_idx = self.mesh.nearest_node(*receiver)
         Z = self._build_impedance()
 
-        print(f"  IR: modal 0-{f_cross:.0f}Hz, ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
+        print(f"  IR: modal 0-{f_cross:.0f}Hz, axial {f_cross:.0f}-8000Hz, "
+              f"ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
 
         # === ENGINE 1: Modal ROM (low frequencies) ===
         t0 = _time.perf_counter()
@@ -293,7 +308,30 @@ class Room:
         b_lo, a_lo = butter(6, f_cross / nyq, btype='low')
         ir_low = filtfilt(b_lo, a_lo, ir_modal)
 
-        # === ENGINE 2: Ray tracer (late reverberation, all frequencies) ===
+        # === ENGINE 2: Axial modes (coherent resonances, f_cross to 8kHz) ===
+        # Computed here but level-matched AFTER the ray tracer (needs its energy)
+        t0 = _time.perf_counter()
+        ir_axial = np.zeros(n_samples)
+        axial_info = []
+        n_axial_modes = 0
+        if self._parallel_pairs:
+            from .axial_modes import axial_mode_ir
+            ir_axial_raw, axial_info = axial_mode_ir(
+                self._parallel_pairs, source, receiver,
+                self._materials, self._default_material,
+                T=T, sr=sr, f_min=f_cross, f_max=8000,
+                room_volume=self._volume,
+                room_surface_area=self._surface_area)
+            ir_axial_raw = ir_axial_raw[:n_samples]
+
+            # Band-pass filter: f_cross to 8kHz
+            f_axial_hi = min(8000, nyq * 0.95)
+            b_ax, a_ax = butter(4, [f_cross / nyq, f_axial_hi / nyq], btype='band')
+            ir_axial = filtfilt(b_ax, a_ax, ir_axial_raw)
+            n_axial_modes = len(axial_info)
+        t_axial = _time.perf_counter() - t0
+
+        # === ENGINE 3: Ray tracer (late reverberation, all frequencies) ===
         t0 = _time.perf_counter()
 
         # Set material absorption on ray trace mesh
@@ -326,7 +364,7 @@ class Room:
 
         t_rt = _time.perf_counter() - t0
 
-        # === ENGINE 3: ISM (early reflections, box rooms only) ===
+        # === ENGINE 4: ISM (early reflections, box rooms only) ===
         t0 = _time.perf_counter()
         ir_ism_early = np.zeros(n_samples)
         if self._geometry_type == 'box' and self._dimensions is not None:
@@ -347,10 +385,26 @@ class Room:
             ir_ism_early[:n] = ir_ism_bp
         t_ism = _time.perf_counter() - t0
 
-        # === BLEND ===
-        ir_total = ir_low + ir_high + ir_ism_early
+        # === Level-match axial modes to ray tracer ===
+        # The axial modes add coherent resonant peaks; the ray tracer
+        # provides the diffuse energy envelope. Scale axial to be at
+        # the same energy level as the ray tracer (they occupy the
+        # same frequency range), so they add spectral detail without
+        # dominating the overall energy.
+        if n_axial_modes > 0:
+            n_start = int(0.02 * sr)
+            n_end = min(int(0.15 * sr), n_samples)
+            rms_rt = np.sqrt(np.mean(ir_high[n_start:n_end]**2))
+            rms_axial = np.sqrt(np.mean(ir_axial[n_start:n_end]**2))
+            if rms_axial > 1e-30 and rms_rt > 1e-30:
+                # Axial at same level as ray tracer — they combine additively
+                ir_axial *= rms_rt / rms_axial
 
-        print(f"  Modal: {t_modal:.2f}s, Ray trace: {t_rt:.1f}s, ISM: {t_ism:.2f}s")
+        # === BLEND ===
+        ir_total = ir_low + ir_axial + ir_high + ir_ism_early
+
+        print(f"  Modal: {t_modal:.2f}s, Axial: {t_axial:.3f}s ({n_axial_modes} modes), "
+              f"Ray trace: {t_rt:.1f}s, ISM: {t_ism:.2f}s")
 
         return ImpulseResponse(ir_total, sr, ir_modal=ir_low, ir_ism=ir_high)
 
