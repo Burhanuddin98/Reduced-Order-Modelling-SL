@@ -224,26 +224,35 @@ def synthesize_ir(modes, T=3.0, sr=44100, ism_ir=None):
         amp, gam, wd, nc = amp[sig], gam[sig], wd[sig], nc[sig]
 
         if len(amp) > 0:
-            # Force exact dtypes Numba expects (avoids recompilation)
             amp = np.array(amp, dtype=np.float64, copy=False)
             gam = np.array(gam, dtype=np.float64, copy=False)
             wd = np.array(wd, dtype=np.float64, copy=False)
             nc = np.array(nc, dtype=np.int64)
 
-            _use_numba = False
+            # 3-tier dispatch: GPU (CuPy) → CPU (Numba JIT) → numpy
+            synthesized = False
+
+            # Tier 1: CUDA GPU
             try:
-                from .analytical_modes import _synthesize_numba, _HAVE_NUMBA
-                _use_numba = _HAVE_NUMBA
+                from .cuda_synthesis import has_gpu, synthesize_gpu
+                if has_gpu():
+                    ir = synthesize_gpu(amp, gam, wd, nc, n_samples, float(dt))
+                    synthesized = True
             except Exception:
+                pass
+
+            # Tier 2: Numba JIT
+            if not synthesized:
                 try:
-                    from room_acoustics.analytical_modes import _synthesize_numba, _HAVE_NUMBA
-                    _use_numba = _HAVE_NUMBA
+                    from .analytical_modes import _synthesize_numba, _HAVE_NUMBA
+                    if _HAVE_NUMBA:
+                        ir = _synthesize_numba(ir, amp, gam, wd, nc, float(dt))
+                        synthesized = True
                 except Exception:
                     pass
 
-            if _use_numba:
-                ir = _synthesize_numba(ir, amp, gam, wd, nc, float(dt))
-            else:
+            # Tier 3: numpy fallback
+            if not synthesized:
                 _synthesize_numpy(ir, amp, gam, wd, nc, dt, sr, n_samples)
 
     # Add ISM early reflections
