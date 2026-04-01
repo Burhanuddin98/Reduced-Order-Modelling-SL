@@ -68,14 +68,34 @@ Reduces decay rate error from 51% → 28%. Best for low-order modes (<150 Hz).
 - Root cause: FI impedance gives single alpha per surface; real materials absorb more at higher freq
 - Ray tracer + axial modes need frequency-dependent absorption per octave band
 
-## Commits this session (feature/axial-modes branch)
+## Commits this session (feature/axial-modes branch, 9 commits)
 - 658c71d: Axial mode engine + project documentation
 - 846327d: Phase 3 BRAS test + measured ground truth from WAVs
 - 0e5d2d7: Axial mode verification vs BRAS measured RIRs (88% spectral match)
 - db7fa0c: 3D coupling loss model (decay error 51% → 28%)
 - 0b352e0: Housekeeping: session summary, spec doc, verification plot
-- e563949: Phase 3 first run results
+- e563949: Phase 3 first run results (broadband 3%, octave-band 20-67%)
+- 4e149f6: Housekeeping: metrics, roadmap, session summary
+- 523eaf3: Note on per-surface calibration approach
+- c5a3404: Per-surface absorption calibration tool (1-8.5% RMS T30 error)
+
+## Per-surface absorption calibration
+Inverse problem: modal decay rate decomposes by surface as
+  gamma_i = sum_s( w_s_i / Z_s )
+where w_s_i is precomputed once. Changing materials only rescales — no
+re-eigensolve, no IR synthesis. Microsecond recalculation.
+
+Calibration results (BRAS CR2, 10 RIRs, 4 bands):
+  250 Hz: 8.5% RMS error (per-surface variation detected)
+  500 Hz: 1.9%, 1000 Hz: 2.1%, 2000 Hz: 1.0%
+
+Same decomposition enables real-time material A/B comparison and
+parametric optimization.
 
 ## Next steps
-- **Per-band absorption calibration**: inverse problem — measure per-band RT from WAVs → infer alpha per surface per band. This replaces the FI single-alpha model for high-frequency engines.
+- **Wire calibrated per-band alpha into hybrid pipeline** — the Phase 3
+  gap (20-67% octave-band T30 error) is caused by FI single-alpha model.
+  Calibrated per-band values exist, need to propagate to ray tracer +
+  axial modes on a per-band basis.
 - **Phase 2** (other PC): frequency-domain ROM greedy basis enrichment
+- **Phase 4**: Non-shoebox validation (CR3/CR4 data downloaded)
