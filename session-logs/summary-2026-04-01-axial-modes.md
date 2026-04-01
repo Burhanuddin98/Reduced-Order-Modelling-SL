@@ -78,6 +78,9 @@ Reduces decay rate error from 51% → 28%. Best for low-order modes (<150 Hz).
 - 4e149f6: Housekeeping: metrics, roadmap, session summary
 - 523eaf3: Note on per-surface calibration approach
 - c5a3404: Per-surface absorption calibration tool (1-8.5% RMS T30 error)
+- 648090e: Final session summary
+- 523eaf3: Note on calibration approach
+- 25b0256: MaterialFunction — freq-dep absorption at arbitrary resolution
 
 ## Per-surface absorption calibration
 Inverse problem: modal decay rate decomposes by surface as
