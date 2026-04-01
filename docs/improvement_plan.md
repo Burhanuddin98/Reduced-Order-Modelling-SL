@@ -75,8 +75,14 @@ Everything else is packaging. This question drives the roadmap.
 - Root cause: FI impedance uses single alpha per surface; real materials
   absorb more at higher frequencies. Ray tracer + axial modes need
   frequency-dependent absorption.
-- **Next:** Implement per-band absorption calibration from measured RIRs
-  (inverse problem: measure per-band RT → infer per-band alpha per surface)
+- **Next:** Per-surface absorption calibration via simulation-measurement residuals.
+  Unlike Eyring inversion (assumes homogeneous field, gives room-mean alpha),
+  this uses the position-dependent simulation at known source/receiver pairs
+  to extract per-surface absorption. The modal ROM gives spatially resolved
+  decay that depends on which surfaces each mode couples to — different
+  receiver positions weight different surfaces differently. Minimizing the
+  per-position, per-band T30 residual between sim and measurement gives
+  per-surface, per-band alpha that Eyring cannot resolve.
 - BRAS data downloaded: 10 measured RIRs, fitted absorption CSVs
 - Accept: T30 <10% per octave band (250-2000 Hz), C80 within 2 dB
 
