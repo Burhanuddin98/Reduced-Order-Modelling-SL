@@ -91,29 +91,55 @@ MEASURED_OCTAVE_EDT = {
     4000: 1.585,
 }
 
-# BRAS CR2 per-surface absorption (third-octave band data, simplified to octave)
-# These are approximate mid-band values from the BRAS documentation
-BRAS_ALPHA_PER_BAND = {
-    # fc:  {floor, ceiling, front, back, left (window), right (door)}
-    125:  {'floor': 0.02, 'ceiling': 0.30, 'front': 0.01, 'back': 0.01,
-           'left': 0.18, 'right': 0.04},
-    250:  {'floor': 0.03, 'ceiling': 0.55, 'front': 0.02, 'back': 0.02,
-           'left': 0.06, 'right': 0.04},
-    500:  {'floor': 0.03, 'ceiling': 0.65, 'front': 0.02, 'back': 0.02,
-           'left': 0.04, 'right': 0.05},
-    1000: {'floor': 0.03, 'ceiling': 0.75, 'front': 0.03, 'back': 0.03,
-           'left': 0.03, 'right': 0.05},
-    2000: {'floor': 0.03, 'ceiling': 0.80, 'front': 0.04, 'back': 0.04,
-           'left': 0.02, 'right': 0.05},
-    4000: {'floor': 0.04, 'ceiling': 0.85, 'front': 0.05, 'back': 0.05,
-           'left': 0.02, 'right': 0.05},
-}
+def load_bras_absorption():
+    """Load BRAS CR2 fitted absorption from CSV files.
+
+    Returns dict: surface_name -> {freq: alpha} for 31 third-octave bands.
+    """
+    csv_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'bras_data', '3 Surface descriptions', '_csv', 'fitted_estimates')
+
+    # BRAS material -> our surface label mapping
+    # CR2 has: ceiling, concrete, floor, plaster, windows
+    # Room layout: floor=floor, ceiling=ceiling, walls=plaster/concrete,
+    #   one wall=windows. We map: front/back=concrete, left=windows, right=plaster
+    file_map = {
+        'floor':   'mat_CR2_floor.csv',
+        'ceiling': 'mat_CR2_ceiling.csv',
+        'front':   'mat_CR2_concrete.csv',
+        'back':    'mat_CR2_concrete.csv',
+        'left':    'mat_CR2_windows.csv',
+        'right':   'mat_CR2_plaster.csv',
+    }
+
+    bras_alpha = {}
+    for label, fname in file_map.items():
+        path = os.path.join(csv_dir, fname)
+        if not os.path.exists(path):
+            print(f"  WARNING: {path} not found, using defaults")
+            continue
+        lines = open(path).readlines()
+        freqs = [float(x) for x in lines[0].strip().split(',')]
+        alphas = [float(x) for x in lines[1].strip().split(',')]
+        bras_alpha[label] = dict(zip(freqs, alphas))
+
+    return bras_alpha
+
+
+def get_bras_alpha_at_freq(bras_alpha, label, freq):
+    """Interpolate BRAS absorption at a given frequency."""
+    if label not in bras_alpha:
+        return 0.05
+    data = bras_alpha[label]
+    freqs_sorted = sorted(data.keys())
+    alphas_sorted = [data[f] for f in freqs_sorted]
+    return float(np.interp(freq, freqs_sorted, alphas_sorted))
 
 
 def compute_octave_band_metrics(ir, sr, fc):
     """Compute T30 and EDT for a single octave band."""
     from room_acoustics.acoustics_metrics import compute_t30, compute_edt
-    from scipy.signal import butter, filtfilt
+    from scipy.signal import butter, sosfiltfilt
 
     nyq = sr / 2
     fl = fc / np.sqrt(2)
@@ -122,8 +148,8 @@ def compute_octave_band_metrics(ir, sr, fc):
     if fl >= nyq * 0.95:
         return None, None
 
-    b, a = butter(4, [fl / nyq, fh / nyq], btype='band')
-    ir_band = filtfilt(b, a, ir)
+    sos = butter(4, [fl / nyq, fh / nyq], btype='band', output='sos')
+    ir_band = sosfiltfilt(sos, ir)
 
     t30, r2 = compute_t30(ir_band, 1.0 / sr)
     edt, _ = compute_edt(ir_band, 1.0 / sr)
@@ -144,8 +170,6 @@ def main():
     # ============================================================
     # Build room with BRAS materials
     # ============================================================
-    # Use mid-frequency absorption to set the FI impedance values
-    # (our Room API uses frequency-independent impedance)
     Lx, Ly, Lz = 8.4, 6.7, 3.0
     rho_c = 1.2 * 343.0
 
@@ -154,44 +178,41 @@ def main():
         R = np.sqrt(1.0 - alpha)
         return rho_c * (1 + R) / (1 - R)
 
-    # Use 500 Hz absorption as the representative FI impedance
-    alpha_500 = BRAS_ALPHA_PER_BAND[500]
+    # Load real BRAS fitted absorption data
+    bras_alpha = load_bras_absorption()
+
+    # Compute mean alpha across 250-2000 Hz for each surface
+    # (representative FI impedance for our frequency-independent solver)
+    target_freqs = [250, 500, 1000, 2000]
+    surface_alpha_mean = {}
+    for label in ['floor', 'ceiling', 'front', 'back', 'left', 'right']:
+        alphas = [get_bras_alpha_at_freq(bras_alpha, label, f) for f in target_freqs]
+        surface_alpha_mean[label] = np.mean(alphas)
+
+    # Register BRAS materials in the material database
+    from room_acoustics.materials import MATERIALS
+    for label, alpha_mean in surface_alpha_mean.items():
+        Z = alpha_to_Z(alpha_mean)
+        mat_name = f'bras_cr2_{label}'
+        MATERIALS[mat_name] = {
+            'Z': Z, 'sigma': 10000, 'd': 0.05,
+            'desc': f'BRAS CR2 {label} (fitted, alpha_mean={alpha_mean:.3f})',
+        }
 
     room = Room.from_box(Lx, Ly, Lz, P=4, ppw=6, f_target=400)
 
-    # Set materials via impedance values (since we don't have exact
-    # material names for BRAS, use impedance directly)
-    # We need to work within the existing material system, so we'll
-    # find the closest material match
-    from room_acoustics.materials import MATERIALS
-
-    def closest_material(target_alpha):
-        """Find material with Z closest to target absorption."""
-        target_Z = alpha_to_Z(target_alpha)
-        best = min(MATERIALS.keys(),
-                   key=lambda m: abs(MATERIALS[m]['Z'] - target_Z))
-        return best
-
-    mat_map = {
-        'floor':   closest_material(alpha_500['floor']),
-        'ceiling': closest_material(alpha_500['ceiling']),
-        'front':   closest_material(alpha_500['front']),
-        'back':    closest_material(alpha_500['back']),
-        'left':    closest_material(alpha_500['left']),
-        'right':   closest_material(alpha_500['right']),
-    }
-
-    print("\n  Material assignments (closest match to BRAS 500 Hz alpha):")
-    for label, mat in mat_map.items():
-        Z = MATERIALS[mat]['Z']
-        alpha = 1.0 - abs((Z - rho_c) / (Z + rho_c))**2
-        print(f"    {label:10s}: {mat:25s} (alpha={alpha:.3f}, "
-              f"target={alpha_500[label]:.3f})")
-        room.set_material(label, mat)
+    mat_map = {}
+    print("\n  BRAS CR2 material assignments (from fitted absorption CSVs):")
+    for label in ['floor', 'ceiling', 'front', 'back', 'left', 'right']:
+        mat_name = f'bras_cr2_{label}'
+        mat_map[label] = mat_name
+        room.set_material(label, mat_name)
+        Z = MATERIALS[mat_name]['Z']
+        print(f"    {label:10s}: alpha_mean={surface_alpha_mean[label]:.4f}, Z={Z:.0f}")
 
     # Build with enough modes to cover up to ~400 Hz
     print()
-    room.build(n_modes=300)
+    room.build(n_modes=200)
 
     # ============================================================
     # Compute IR at two receiver positions
@@ -324,7 +345,7 @@ def main():
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle('Phase 3: BRAS CR2 Full-Bandwidth Validation', fontweight='bold')
 
-    bands = [125, 250, 500, 1000, 2000, 4000]
+    bands = [fc for fc in [250, 500, 1000, 2000, 4000] if fc in MEASURED_OCTAVE_T30]
     x = np.arange(len(bands))
     width = 0.35
 
