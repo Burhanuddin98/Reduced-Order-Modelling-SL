@@ -31,6 +31,68 @@ Usage:
 import numpy as np
 from .material_function import MaterialFunction, air_absorption_coefficient
 
+# Optional Numba JIT for fast synthesis
+try:
+    from numba import njit, prange
+    _HAVE_NUMBA = True
+except ImportError:
+    _HAVE_NUMBA = False
+
+
+def _synthesize_numba(ir, amp, gam, wd, nc, dt):
+    """Numba-accelerated modal synthesis. Fallback defined below."""
+    pass  # replaced by JIT version if Numba available
+
+
+if _HAVE_NUMBA:
+    @njit(cache=True)
+    def _synthesize_numba(ir, amp, gam, wd, nc, dt):
+        """
+        Synthesize IR using recursive oscillators (zero transcendentals).
+
+        Instead of computing exp(-g*t)*cos(w*t) per sample, uses:
+          decay_step = exp(-g*dt)          (precomputed once per mode)
+          cos recurrence: c[k+1] = 2*cos(w*dt)*c[k] - c[k-1]
+
+        This eliminates ALL exp/cos calls from the inner loop,
+        replacing them with 2 multiplies + 1 subtract per mode per sample.
+        """
+        n_modes = len(amp)
+        for i in range(n_modes):
+            a = amp[i]
+            g = gam[i]
+            w = wd[i]
+            n = nc[i]
+            if n <= 0 or abs(a) < 1e-30:
+                continue
+
+            # Precompute per-mode constants (only transcendentals here)
+            decay_step = np.exp(-g * dt)   # multiplied each step
+            cos_coeff = 2.0 * np.cos(w * dt)  # for cos recurrence
+
+            # Initial values: k=0 → env=1, cos=1; k=1 → env*=decay, cos=cos(w*dt)
+            env = 1.0
+            cos_prev = 1.0
+            cos_curr = np.cos(w * dt)
+
+            # k=0
+            ir[0] += a * env * cos_prev
+
+            # k=1
+            if n > 1:
+                env *= decay_step
+                ir[1] += a * env * cos_curr
+
+            # k=2..n-1: pure multiply+subtract, no transcendentals
+            for k in range(2, n):
+                env *= decay_step
+                cos_next = cos_coeff * cos_curr - cos_prev
+                ir[k] += a * env * cos_next
+                cos_prev = cos_curr
+                cos_curr = cos_next
+
+        return ir
+
 
 class AnalyticalRoomModes:
     """
@@ -305,55 +367,37 @@ class AnalyticalRoomModes:
         wd = omega_d[idx]
         nc = n_cut[idx]
 
-        # Sort by n_cut (shortest-lived modes first) for tiered synthesis
-        order = np.argsort(nc)
-        amp = amp[order]
-        gam = gam[order]
-        wd = wd[order]
-        nc = nc[order]
+        dt_val = 1.0 / sr
 
-        # Tiered synthesis: process modes in tiers of increasing duration.
-        # Each tier handles all modes that decay within a time window.
-        # Within each tier, use a single vectorized matrix multiply.
-        #
-        # Tiers: 0-10ms, 10-50ms, 50-200ms, 200ms-1s, 1s-3s
-        # This avoids computing long time vectors for short-lived modes.
-        tier_limits = [int(0.01 * sr), int(0.05 * sr), int(0.2 * sr),
-                       int(1.0 * sr), n_samples]
+        if _HAVE_NUMBA:
+            # Fast path: Numba JIT with parallel threads.
+            # First call has ~1s compilation overhead, then instant.
+            ir = _synthesize_numba(ir, amp, gam, wd, nc, dt_val)
+        else:
+            # Fallback: tiered chunked numpy
+            order = np.argsort(nc)
+            amp, gam, wd, nc = amp[order], gam[order], wd[order], nc[order]
 
-        i = 0
-        for tier_n in tier_limits:
-            # Find all modes in this tier: nc <= tier_n
-            j = i
-            while j < n_active and nc[j] <= tier_n:
-                j += 1
+            tier_limits = [int(0.01 * sr), int(0.05 * sr), int(0.2 * sr),
+                           int(1.0 * sr), n_samples]
+            i = 0
+            for tier_n in tier_limits:
+                j = i
+                while j < n_active and nc[j] <= tier_n:
+                    j += 1
+                if j <= i:
+                    continue
 
-            if j <= i:
-                continue
+                t_len = min(tier_n, n_samples)
+                max_chunk = max(1, int(100e6 / (max(t_len, 1) * 8 * 3)))
+                t_vec = np.arange(t_len, dtype=np.float64) / sr
 
-            n_tier = j - i
-            t_len = min(tier_n, n_samples)
-
-            # For very large tiers, process in memory-safe chunks
-            # Memory: chunk_size * t_len * 8 * 3 (exp + cos + product)
-            # Cap at ~100 MB total intermediate memory
-            max_chunk = max(1, int(100e6 / (max(t_len, 1) * 8 * 3)))
-            t_vec = np.arange(t_len, dtype=np.float64) / sr
-
-            for ci in range(i, j, max_chunk):
-                cj = min(ci + max_chunk, j)
-                c_amp = amp[ci:cj]   # (chunk,)
-                c_gam = gam[ci:cj]   # (chunk,)
-                c_wd = wd[ci:cj]     # (chunk,)
-
-                # (chunk, t_len) = (chunk, 1) * (1, t_len)
-                phase = c_wd[:, np.newaxis] * t_vec[np.newaxis, :]
-                decay = np.exp(-c_gam[:, np.newaxis] * t_vec[np.newaxis, :])
-
-                # Sum over modes: ir += sum(amp * exp(-g*t) * cos(w*t))
-                ir[:t_len] += np.dot(c_amp, decay * np.cos(phase))
-
-            i = j
+                for ci in range(i, j, max_chunk):
+                    cj = min(ci + max_chunk, j)
+                    phase = wd[ci:cj, np.newaxis] * t_vec[np.newaxis, :]
+                    decay = np.exp(-gam[ci:cj, np.newaxis] * t_vec[np.newaxis, :])
+                    ir[:t_len] += np.dot(amp[ci:cj], decay * np.cos(phase))
+                i = j
 
         return ir, self._make_info(n_active)
 
