@@ -21,9 +21,17 @@ room_acoustics/                 Core Python package (~9,200 LOC)
   impedance_fit.py             Vector fitting for freq-dependent materials (Miki)
   image_source.py              ISM for early/late reflections
   ray_tracer.py                Python ray tracer for high-frequency content
+  unified_modes.py             Plug-and-play modal synthesis: providers → merge → synthesize
+  analytical_modes.py          Exact box room modes (axial+tangential+oblique), Numba JIT
+  generalized_modes.py         Non-box room modes via perpendicular parallel pair detection
   axial_modes.py               Parallel surface detection + 1D axial mode synthesis
   material_function.py         Frequency-dependent absorption functions alpha(f) at any resolution
+  material_catalog.py          28 catalog materials as MaterialFunction objects
   calibrate_absorption.py      Per-surface absorption calibration from measured RIRs
+  calibrate_spectral.py        Spectral calibration with regularization + catalog priors
+  fdtd.py                      27-pt Laplacian FDTD solver (CPU/GPU via CuPy)
+  voxelize.py                  Box/STL voxelization, boundary detection
+  spectral_tools.py            WAV comparison, spectrogram, peak extraction
   materials.py                 22-material database, per-surface assignment (FI legacy)
   acoustics_metrics.py         ISO 3382 metrics (T30, T20, EDT, C80, D50, TS)
   visualize.py                 Pressure field plots, energy decay curves
