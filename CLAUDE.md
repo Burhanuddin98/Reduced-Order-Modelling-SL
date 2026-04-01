@@ -32,6 +32,7 @@ room_acoustics/                 Core Python package (~9,200 LOC)
   fdtd.py                      27-pt Laplacian FDTD solver (CPU/GPU via CuPy)
   voxelize.py                  Box/STL voxelization, boundary detection
   spectral_tools.py            WAV comparison, spectrogram, peak extraction
+  cuda_synthesis.py            CUDA GPU synthesis kernel (CuPy) + CPU fallback
   materials.py                 22-material database, per-surface assignment (FI legacy)
   acoustics_metrics.py         ISO 3382 metrics (T30, T20, EDT, C80, D50, TS)
   visualize.py                 Pressure field plots, energy decay curves
