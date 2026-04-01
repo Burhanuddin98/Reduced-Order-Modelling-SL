@@ -139,17 +139,20 @@ Used for: fast time-domain simulation when analytical modal solution isn't appli
 ## Crossover design
 
 ```
-    Modal ROM         Axial Modes         Ray Tracer
-   (wave-based)     (1D analytical)      (geometric)
-        |                 |                    |
-  accurate below    coherent peaks       diffuse energy
-    f_cross         f_cross to f_max     above f_cross
-        |                 |                    |
-     low-pass         band-pass            high-pass
-        |                 |                    |
-        +--------+--------+--------+----------+
-                          |
-                    broadband IR
+  Eigensolve      Analytical     Axial       Statistical     ISM
+  (exact modes)   (box exact)    (parallel)  (Weyl density)  (early refl)
+  0-f_mesh        0-f_max        any room    any room        box rooms
+  conf=0.95       conf=1.0       conf=0.65   conf=0.4        non-modal
+       |               |             |             |              |
+       +-------+-------+------+------+             |              |
+               |              |                    |              |
+         Unified Mode List (merge by confidence)   |              |
+               |                                   |              |
+         Single synthesis pass (Numba JIT)         |              |
+               |                                   |              |
+               +------- + add ISM separately ------+              |
+                                    |                             |
+                              broadband IR
 
 f_cross ≈ 400 Hz (Schroeder frequency of typical room)
 ```
@@ -164,6 +167,12 @@ where T60 = reverberation time [s], V = room volume [m^3]
 Below f_s: room modes dominate (wave behavior, modal ROM accurate).
 Above f_s: diffuse field (geometric behavior, ray tracer accurate).
 
-The axial mode engine bridges the gap: it captures the **coherent resonant peaks** (flutter echo, comb filtering) that the ray tracer smears into diffuse energy. Together, axial modes (peaks) + ray tracer (envelope) give a more complete high-frequency picture than either alone.
+The unified modal synthesis replaces crossover-filter blending. Each engine
+contributes modes as (frequency, amplitude, decay_rate) tuples. Confidence-based
+merge deduplicates overlapping modes — higher-confidence engines win. One synthesis
+pass produces the IR via Numba JIT recursive oscillator (no exp/cos calls in inner loop).
 
-See `docs/axial_mode_spec.md` for full specification.
+For box rooms: analytical modes provide exact coverage at any frequency.
+For irregular rooms: eigensolve (low freq) + axial (parallel surfaces) + statistical
+(Weyl density fill) combine to cover the full bandwidth.
+ISM early reflections are added separately (discrete arrivals, not standing waves).

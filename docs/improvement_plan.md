@@ -59,13 +59,14 @@ Everything else is packaging. This question drives the roadmap.
 - Target: <1% error at all frequencies 20-500 Hz with 30-60 basis vectors
 - Risk: medium (well-established algorithm, tricky near singularities)
 
-### Phase 2b: Axial mode engine [NOT STARTED]
-- Detect parallel surface pairs from boundary geometry (any room shape)
-- Compute 1D analytical axial modes per pair (f_n = n*c/(2L), decay from materials)
-- Synthesize coherent resonant IR (flutter echo, comb filtering) — zero mesh cost
-- Integrate into hybrid blend: ir_low + ir_axial + ir_diffuse + ir_ism
-- Target: reduce 2-4 kHz T30 error from 24-33% toward <15%
-- Risk: low (physics is exact, implementation is simple numpy)
+### Phase 2b: Unified modal synthesis [DONE]
+- Axial mode engine: parallel surface detection, 3D coupling loss, air absorption
+- Verified vs BRAS measured: 88% spectral match, 28% decay error (coupling model)
+- Full analytical modes: axial + tangential + oblique for box rooms (Kuttruff decay)
+- Generalized modes: non-box rooms via perpendicular pair detection
+- Statistical modes: Weyl-density fill for irregular rooms
+- Unified pipeline: provider registry, confidence-based merge, single-pass Numba JIT synthesis
+- Best result (axial+statistical): broadband T30 9.3%, 250Hz 21%, 500Hz 12%, 1kHz 9%
 - Spec: `docs/axial_mode_spec.md`
 
 ### Phase 3: BRAS CR2 full-bandwidth validation [IN PROGRESS]

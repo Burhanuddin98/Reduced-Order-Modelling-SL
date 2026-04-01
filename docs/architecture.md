@@ -66,11 +66,15 @@ Hybrid room acoustics engine: **Modal ROM** (low-frequency wave simulation) + **
 | `geometry.py` | 368 | Room geometry definitions, Gmsh interface for automated meshing |
 | `gmsh_tet_import.py` | 271 | Gmsh .msh file parser, surface mesh extraction |
 
-### Layer 4: Geometric acoustics + axial modes
+### Layer 4: Unified modal synthesis + geometric acoustics
 
 | File | LOC | Role |
 |------|-----|------|
-| `axial_modes.py` | — | **Planned.** Parallel surface detection + analytical 1D axial mode synthesis (flutter echo, coherent resonances). See `docs/axial_mode_spec.md` |
+| `unified_modes.py` | 645 | **Core orchestrator.** Provider registry, merge/dedup, single-pass synthesis (Numba JIT) |
+| `analytical_modes.py` | ~300 | Exact box room modes (axial+tangential+oblique), Kuttruff decay, Numba recursive oscillator |
+| `generalized_modes.py` | ~280 | Non-box room modes via perpendicular parallel pair detection |
+| `axial_modes.py` | ~400 | Parallel surface detection + 1D axial mode synthesis with 3D coupling loss |
+| `statistical_modes.py` | ~150 | Weyl-density statistical mode fill for irregular rooms above eigensolve range |
 | `image_source.py` | 322 | Image Source Method for shoebox rooms (early reflections + Eyring diffuse tail) |
 | `ray_tracer.py` | 287 | Python stochastic ray tracer (Moller-Trumbore intersection, scattering) |
 
@@ -255,9 +259,19 @@ Eigenmodes of the generalized problem `S*phi = lambda*M*phi`. Each mode has:
 
 No time-stepping required. Zero numerical dispersion. 0.2s for 3.5s IR.
 
-### 1b. Axial Mode Engine (planned — mesh-free high-frequency extension)
+### 1b. Unified Modal Synthesis (unified_modes.py)
 
-Detects parallel surface pairs in the geometry and computes 1D axial modes analytically. No mesh, no eigensolve, no DOF scaling — exact solution for the dominant high-frequency coherent resonances (flutter echo, comb filtering). Fills the gap between modal ROM (limited by mesh resolution) and ray tracer (misses coherent peaks). See `docs/axial_mode_spec.md` for full specification.
+Plug-and-play architecture where multiple engines contribute modes as `(frequency, amplitude, decay_rate)` tuples to a shared list. Confidence-based merge deduplicates overlapping modes. Single synthesis pass via Numba JIT recursive oscillator (2.9s for 37K modes). No crossover filters.
+
+Available providers:
+- **AnalyticalModesProvider** (confidence 1.0): exact box room modes (axial+tangential+oblique)
+- **ModalROMProvider** (confidence 0.95): eigensolve modes with exact decay
+- **GeneralizedModesProvider** (confidence 0.75): non-box modes from perpendicular pairs
+- **AxialModesProvider** (confidence 0.65): 1D parallel surface modes with 3D coupling
+- **StatisticalModesProvider** (confidence 0.4): Weyl-density fill for irregular rooms
+- ISM early reflections added separately (discrete arrivals, not modal)
+
+Adding a new engine: implement `provide_modes()` → register with `synth.register()`. That's it.
 
 ### 2. PSD basis ROM (time-domain, structure-preserving)
 
