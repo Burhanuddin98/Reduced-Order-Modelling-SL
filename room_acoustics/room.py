@@ -178,17 +178,39 @@ class Room:
     # Materials
     # ============================================================
 
-    def set_material(self, surface_label, material_name):
-        """Assign a material to a surface."""
-        from .materials import get_material
-        get_material(material_name)  # validate
-        self._materials[surface_label] = material_name
+    def set_material(self, surface_label, material):
+        """Assign a material to a surface.
 
-    def set_material_default(self, material_name):
-        """Set default material for unlabeled surfaces."""
-        from .materials import get_material
-        get_material(material_name)
-        self._default_material = material_name
+        Parameters
+        ----------
+        surface_label : str
+            Surface identifier (e.g., 'floor', 'ceiling', 'left').
+        material : str or MaterialFunction
+            Material name from the database (FI impedance), or a
+            MaterialFunction for frequency-dependent absorption.
+        """
+        from .material_function import MaterialFunction
+        if isinstance(material, MaterialFunction):
+            self._materials[surface_label] = material
+        else:
+            from .materials import get_material
+            get_material(material)  # validate
+            self._materials[surface_label] = material
+
+    def set_material_default(self, material):
+        """Set default material for unlabeled surfaces.
+
+        Parameters
+        ----------
+        material : str or MaterialFunction
+        """
+        from .material_function import MaterialFunction
+        if isinstance(material, MaterialFunction):
+            self._default_material = material
+        else:
+            from .materials import get_material
+            get_material(material)
+            self._default_material = material
 
     def list_surfaces(self):
         """Print available surface labels and their materials."""
@@ -228,6 +250,15 @@ class Room:
             compute_room_modes(self.ops, n_modes)
         f_max = self._frequencies[-1]
         print(f" f_max={f_max:.0f} Hz")
+
+        # Precompute per-surface modal coupling weights for fast
+        # material changes (gamma_i = sum_s(w_s_i / Z_s(f_i)))
+        if self._geometry_type == 'box' and self._dimensions is not None:
+            from .calibrate_absorption import precompute_surface_gamma_weights
+            self._surface_weights = precompute_surface_gamma_weights(
+                self.mesh, self.ops, self._eigenvectors, self._dimensions)
+        else:
+            self._surface_weights = None
 
         # Build ray tracing mesh from boundary faces
         print("  Ray trace mesh...", end='', flush=True)
@@ -288,19 +319,43 @@ class Room:
         nyq = sr / 2
 
         rec_idx = self.mesh.nearest_node(*receiver)
-        Z = self._build_impedance()
 
-        print(f"  IR: modal 0-{f_cross:.0f}Hz, axial {f_cross:.0f}-8000Hz, "
-              f"ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
+        # Try spectral (frequency-dependent) decay first
+        gamma_spectral = self._compute_spectral_decay()
+        use_spectral = gamma_spectral is not None
+
+        if use_spectral:
+            print(f"  IR: modal 0-{f_cross:.0f}Hz (spectral alpha), "
+                  f"axial {f_cross:.0f}-8000Hz, ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
+        else:
+            print(f"  IR: modal 0-{f_cross:.0f}Hz, axial {f_cross:.0f}-8000Hz, "
+                  f"ray tracer {f_cross:.0f}-{nyq:.0f}Hz")
 
         # === ENGINE 1: Modal ROM (low frequencies) ===
         t0 = _time.perf_counter()
-        from .modal_rom import modal_ir
-        res = modal_ir(self.mesh, self.ops,
-                       self._eigenvalues, self._eigenvectors,
-                       'FI', {'Z_per_node': Z},
-                       *source, sigma, dt, T, rec_idx)
-        ir_modal = res['ir'][:n_samples]
+        if use_spectral:
+            # Spectral path: per-mode decay from alpha(f_i)
+            from .calibrate_absorption import synthesize_ir_fast
+            c = 343.0
+            omega = np.sqrt(np.maximum(self._eigenvalues, 0)) * c
+            M = self.ops['M_diag']
+            r2 = ((self.mesh.x - source[0]) ** 2 +
+                  (self.mesh.y - source[1]) ** 2 +
+                  (self.mesh.z - source[2]) ** 2)
+            p0 = np.exp(-r2 / sigma ** 2)
+            modal_amps = self._eigenvectors.T @ (M * p0)
+            ir_modal = synthesize_ir_fast(
+                self._eigenvalues, self._eigenvectors, omega,
+                modal_amps, gamma_spectral, rec_idx, dt, T)[:n_samples]
+        else:
+            # Legacy FI path
+            Z = self._build_impedance()
+            from .modal_rom import modal_ir
+            res = modal_ir(self.mesh, self.ops,
+                           self._eigenvalues, self._eigenvectors,
+                           'FI', {'Z_per_node': Z},
+                           *source, sigma, dt, T, rec_idx)
+            ir_modal = res['ir'][:n_samples]
         t_modal = _time.perf_counter() - t0
 
         # Low-pass at crossover
@@ -335,11 +390,17 @@ class Room:
         t0 = _time.perf_counter()
 
         # Set material absorption on ray trace mesh
-        from .materials import get_material
+        # Use alpha at 1 kHz as representative for ray tracer (broadband geometric)
+        from .material_function import MaterialFunction
         from .acoustics_metrics import impedance_to_alpha
         for label in self._get_labels():
-            mat = get_material(self._materials.get(label, self._default_material))
-            self._rt_mesh.set_alpha(label, impedance_to_alpha(mat['Z']))
+            mat_ref = self._materials.get(label, self._default_material)
+            if isinstance(mat_ref, MaterialFunction):
+                self._rt_mesh.set_alpha(label, mat_ref(1000.0))
+            else:
+                from .materials import get_material
+                mat = get_material(mat_ref)
+                self._rt_mesh.set_alpha(label, impedance_to_alpha(mat['Z']))
 
         from .ray_tracer import reflectogram_to_ir
         reflecto = self._ray_trace_c(source, receiver, n_rays, max_bounces, T)
@@ -471,16 +532,48 @@ class Room:
             return list(self.mesh._boundary_nodes_per_label.keys())
         return []
 
-    def _build_impedance(self):
-        """Build per-node impedance from material assignments."""
+    def _resolve_material_function(self, label):
+        """Get MaterialFunction for a surface label."""
+        from .material_function import MaterialFunction
+        mat = self._materials.get(label, self._default_material)
+        if isinstance(mat, MaterialFunction):
+            return mat
+        # Legacy string name -> convert to MaterialFunction via FI impedance
         from .materials import get_material
+        m = get_material(mat)
+        return MaterialFunction.from_impedance_scalar(m['Z'], name=mat)
+
+    def _compute_spectral_decay(self):
+        """Compute per-mode decay rates using frequency-dependent absorption.
+
+        Each mode's decay uses alpha(f_i) at its own eigenfrequency.
+        Returns gamma array (n_modes,).
+        """
+        from .material_function import compute_modal_decay_spectral
+
+        if self._surface_weights is None:
+            # Fallback: use FI impedance path
+            return None
+
+        mat_funcs = {}
+        for label in self._surface_weights:
+            mat_funcs[label] = self._resolve_material_function(label)
+
+        return compute_modal_decay_spectral(
+            self._surface_weights, mat_funcs, self._frequencies, c=343.0)
+
+    def _build_impedance(self):
+        """Build per-node impedance from material assignments (FI legacy path)."""
+        from .material_function import MaterialFunction
         from .solvers import RHO_AIR, C_AIR
         rho_c = RHO_AIR * C_AIR
 
-        def a2z(a):
-            a = np.clip(a, 0.001, 0.999)
-            R = np.sqrt(1.0 - a)
-            return rho_c * (1 + R) / (1 - R)
+        def _get_Z(mat_ref):
+            """Get FI impedance from material ref (string or MaterialFunction)."""
+            if isinstance(mat_ref, MaterialFunction):
+                return mat_ref.impedance(500.0, rho_c=rho_c)
+            from .materials import get_material
+            return get_material(mat_ref)['Z']
 
         N = self.mesh.N_dof
         Z = np.full(N, 1e15)
@@ -497,27 +590,32 @@ class Room:
                 'back': self.mesh.y > Ly - tol,
             }
             for label, mask in face_map.items():
-                mat = get_material(self._materials.get(label, self._default_material))
-                Z[mask] = mat['Z']
+                mat_ref = self._materials.get(label, self._default_material)
+                Z[mask] = _get_Z(mat_ref)
         else:
             for label in self._get_labels():
-                mat = get_material(self._materials.get(label, self._default_material))
+                mat_ref = self._materials.get(label, self._default_material)
                 nodes = self.mesh.boundary_nodes(label)
-                Z[nodes] = mat['Z']
+                Z[nodes] = _get_Z(mat_ref)
 
         return Z
 
     def _get_wall_alpha(self):
         """Get absorption per wall for ISM (box rooms only)."""
-        from .materials import get_material
+        from .material_function import MaterialFunction
         from .acoustics_metrics import impedance_to_alpha
         wall_labels = {'x0': 'left', 'x1': 'right',
                        'y0': 'front', 'y1': 'back',
                        'z0': 'floor', 'z1': 'ceiling'}
         alpha = {}
         for wall, label in wall_labels.items():
-            mat = get_material(self._materials.get(label, self._default_material))
-            alpha[wall] = impedance_to_alpha(mat['Z'])
+            mat_ref = self._materials.get(label, self._default_material)
+            if isinstance(mat_ref, MaterialFunction):
+                alpha[wall] = mat_ref(500.0)
+            else:
+                from .materials import get_material
+                mat = get_material(mat_ref)
+                alpha[wall] = impedance_to_alpha(mat['Z'])
         return alpha
 
     def _build_box_rt_mesh(self):
@@ -560,8 +658,7 @@ class Room:
     def _ray_trace_c(self, source, receiver, n_rays, max_bounces, T):
         """Run the C ray tracer. Falls back to Python if DLL not found."""
         import ctypes
-        from .materials import get_material
-        from .acoustics_metrics import impedance_to_alpha
+        from .material_function import MaterialFunction
 
         rt = self._rt_mesh
         n_tris = rt.n_triangles
@@ -574,12 +671,13 @@ class Room:
         for i in range(n_tris):
             label = rt.surface_labels[i]
             tri_alpha[i] = rt.surface_alpha.get(label, 0.05)
-            # Use per-surface scattering from material database
-            mat_name = self._materials.get(label, self._default_material)
-            mat = get_material(mat_name)
-            # Scattering: use 'scatter' key if present, else estimate
-            # from material type
-            tri_scatter[i] = mat.get('scatter', 0.02)
+            mat_ref = self._materials.get(label, self._default_material)
+            if isinstance(mat_ref, MaterialFunction):
+                tri_scatter[i] = mat_ref.scatter(1000.0)
+            else:
+                from .materials import get_material
+                mat = get_material(mat_ref)
+                tri_scatter[i] = mat.get('scatter', 0.02)
 
         verts = np.ascontiguousarray(rt.vertices.ravel(), dtype=np.float64)
         tris = np.ascontiguousarray(rt.triangles.ravel(), dtype=np.int32)

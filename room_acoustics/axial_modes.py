@@ -283,15 +283,20 @@ def axial_mode_ir(pairs, source, receiver, material_map, default_material='plast
     gamma_room = 0.0
     has_coupling = False
     if room_volume is not None and room_surface_area is not None:
-        # Estimate mean absorption from all materials used
+        # Estimate mean absorption from all materials at 500 Hz (representative)
+        from .material_function import MaterialFunction
         mean_alpha = 0.0
         n_surfaces = 0
         for pair in pairs:
-            mat_1 = get_material(material_map.get(pair.label_1, default_material))
-            mat_2 = get_material(material_map.get(pair.label_2, default_material))
-            mean_alpha += impedance_to_alpha(mat_1['Z'])
-            mean_alpha += impedance_to_alpha(mat_2['Z'])
-            n_surfaces += 2
+            mat_ref_1 = material_map.get(pair.label_1, default_material)
+            mat_ref_2 = material_map.get(pair.label_2, default_material)
+            for mat_ref in [mat_ref_1, mat_ref_2]:
+                if isinstance(mat_ref, MaterialFunction):
+                    mean_alpha += mat_ref(500.0)
+                else:
+                    mat = get_material(mat_ref)
+                    mean_alpha += impedance_to_alpha(mat['Z'])
+                n_surfaces += 1
         if n_surfaces > 0:
             mean_alpha /= n_surfaces
         mean_alpha = max(mean_alpha, 0.01)
@@ -327,24 +332,25 @@ def axial_mode_ir(pairs, source, receiver, material_map, default_material='plast
         x_src = np.clip(x_src, 0.0, L)
         x_rec = np.clip(x_rec, 0.0, L)
 
-        # Get absorption coefficients for both surfaces
-        mat_1 = get_material(material_map.get(pair.label_1, default_material))
-        mat_2 = get_material(material_map.get(pair.label_2, default_material))
-        alpha_1 = impedance_to_alpha(mat_1['Z'])
-        alpha_2 = impedance_to_alpha(mat_2['Z'])
+        # Resolve materials — supports both legacy strings and MaterialFunction
+        from .material_function import MaterialFunction
+        mat_ref_1 = material_map.get(pair.label_1, default_material)
+        mat_ref_2 = material_map.get(pair.label_2, default_material)
+
+        if isinstance(mat_ref_1, MaterialFunction):
+            mat_func_1 = mat_ref_1
+        else:
+            mat_1 = get_material(mat_ref_1)
+            mat_func_1 = MaterialFunction.from_impedance_scalar(mat_1['Z'], name=mat_ref_1)
+
+        if isinstance(mat_ref_2, MaterialFunction):
+            mat_func_2 = mat_ref_2
+        else:
+            mat_2 = get_material(mat_ref_2)
+            mat_func_2 = MaterialFunction.from_impedance_scalar(mat_2['Z'], name=mat_ref_2)
 
         # Solid angle weight: larger, closer surfaces contribute more
         weight_pair = pair.overlap_area / total_pair_area
-
-        # Reflection coefficient product (for decay calculation)
-        R_product = (1.0 - alpha_1) * (1.0 - alpha_2)
-        if R_product <= 0:
-            # Fully absorbing — no resonance
-            continue
-
-        # Decay rate (same for all modes of this pair in FI model)
-        # gamma = c/(2L) * (-ln(R1 * R2))
-        gamma_base = (c / (2.0 * L)) * (-np.log(R_product))
 
         # Maximum mode number
         n_max = int(np.floor(2.0 * L * f_max / c))
@@ -371,14 +377,20 @@ def axial_mode_ir(pairs, source, receiver, material_map, default_material='plast
         # Amplitude: coupling * normalization * solid angle weight
         A_n = S_n * R_n * (2.0 / L) * weight_pair
 
-        # Decay rate: blend pair-specific and room-average via coupling
+        # Per-mode decay: alpha evaluated at each mode's frequency
+        alpha_1_arr = mat_func_1(freqs)
+        alpha_2_arr = mat_func_2(freqs)
+        R_product = (1.0 - alpha_1_arr) * (1.0 - alpha_2_arr)
+        R_product = np.maximum(R_product, 1e-10)  # avoid log(0)
+        gamma_pair = (c / (2.0 * L)) * (-np.log(R_product))
+
+        # 3D coupling correction
         if has_coupling and room_surface_area > 0:
-            A_pair = pair.overlap_area * 2  # both surfaces
+            A_pair = pair.overlap_area * 2
             coupling = 1.0 - min(A_pair / room_surface_area, 1.0)
-            gamma_eff = (1.0 - coupling) * gamma_base + coupling * gamma_room
+            gamma_n = (1.0 - coupling) * gamma_pair + coupling * gamma_room
         else:
-            gamma_eff = gamma_base
-        gamma_n = np.full(len(freqs), gamma_eff)
+            gamma_n = gamma_pair
 
         # Angular frequencies
         omega_n = 2.0 * np.pi * freqs
