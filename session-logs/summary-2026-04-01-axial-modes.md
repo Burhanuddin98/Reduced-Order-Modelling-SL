@@ -1,104 +1,73 @@
-# Session Summary: 2026-04-01 — Axial Mode Engine + Project Documentation
+# Session Summary: 2026-04-01 — Axial Mode Engine → Full Analytical Modes
 
 ## Overview
-Set up the project for Claude Code collaboration (CLAUDE.md, architecture, signal chain, improvement plan, research references). Designed and implemented the axial mode engine for mesh-free high-frequency resonance synthesis. Integrated into the hybrid IR pipeline as Engine 2.
+Major session: set up collaboration infrastructure, built the axial mode engine (Michael's parallel surface idea), verified against measured RIRs, added air absorption, built calibration tools, rewrote modal-clouds components, and extended to full analytical room modes (axial + tangential + oblique).
 
-## Commits this session
-- (pending) Initial project documentation: CLAUDE.md, docs/architecture.md, docs/signal_chain.md, docs/improvement_plan.md, docs/research_references.md
-- (pending) Axial mode engine: axial_modes.py, integration into room.py, validation tests, spec doc
+## Branch: feature/axial-modes (18 commits)
 
-## Key changes
+### Core new modules
+| Module | LOC | Purpose |
+|--------|-----|---------|
+| axial_modes.py | ~400 | Parallel surface detection + 1D axial mode synthesis |
+| analytical_modes.py | ~230 | Full analytical modal solution for box rooms (all mode types) |
+| generalized_modes.py | ~280 | Extended modes for non-rectangular rooms |
+| material_function.py | ~200 | Frequency-dependent alpha(f) at arbitrary resolution |
+| material_catalog.py | ~250 | 28 catalog materials as MaterialFunction objects |
+| calibrate_absorption.py | ~640 | Per-surface absorption calibration from measured RIRs |
+| calibrate_spectral.py | ~330 | Spectral calibration with regularization |
+| fdtd.py | ~350 | 27-pt Laplacian FDTD solver (CPU/GPU) |
+| voxelize.py | ~280 | Box/STL voxelization, boundary detection |
+| spectral_tools.py | ~250 | WAV comparison, spectrogram, peak extraction |
 
-### Documentation (new)
-- **CLAUDE.md** — conventions, metrics, pre-push checklist, session workflow (mirrors ATTuner structure)
-- **docs/architecture.md** — full module map, data flow, operators, element types, ROM methods, threading
-- **docs/signal_chain.md** — build + query pipeline spec with crossover design
-- **docs/improvement_plan.md** — 7-phase roadmap with metrics, decision points, tech debt
-- **docs/research_references.md** — Bonthu, Sampedro Llopis, BRAS, key concepts
-- **session-logs/** directory created
+### Infrastructure
+- CLAUDE.md, docs/architecture.md, docs/signal_chain.md, docs/improvement_plan.md
+- docs/research_references.md, docs/axial_mode_spec.md
+- session-logs/ directory
 
-### Axial mode engine (new)
-- **room_acoustics/axial_modes.py** (~220 LOC):
-  - `detect_parallel_surfaces(rt_mesh)` — groups boundary triangles by label, area-weighted normals, finds anti-parallel pairs
-  - `detect_parallel_surfaces_box(dimensions)` — shortcut for box rooms
-  - `axial_mode_ir(pairs, source, receiver, materials, ...)` — vectorized 1D mode synthesis with analytical decay, source/receiver coupling, solid angle weighting, RT60-based minimum decay rate
-- **docs/axial_mode_spec.md** — full design specification
-- **room_acoustics/validate_axial_modes.py** — 5 validation tests, all passing
+### BRAS data (bras_data/, gitignored)
+- CR2, CR3, CR4 scene ZIPs downloaded (2.2 GB total)
+- Surface absorption CSVs extracted (31 third-octave bands per surface)
+- 10 measured dodecahedron RIRs extracted
 
-### Room API integration
-- **room_acoustics/room.py**:
-  - `build()` detects parallel surfaces (cached)
-  - `impulse_response()` now runs 4-engine blend: modal ROM + axial modes + ray tracer + ISM
-  - Level matching: axial modes scaled to ray tracer energy level
-  - RT60-clamped decay prevents unphysical ringing
+## Key findings
 
-## Validation results
-- 5/5 unit tests passing (frequencies, flutter echo, position dependence, decay rate, mesh detection)
-- A/B comparison on BRAS CR2 (coarse mesh): axial modes add +0.1-0.4 dB per octave band without distorting T30/EDT/C80
-- Verified against BRAS CR2 measured WAVs:
-  - Spectral peak match: 88% (35/40 predicted modes found within ±3 Hz)
-  - Decay rate (1D model): 51% mean error
-  - Decay rate (coupling model): 28% mean, 24% median error
-  - Position dependence: 16.4 dB spread across receivers confirmed
+### Engine comparison (head-to-head vs BRAS measured)
+| Engine | Broadband T30 err | 500 Hz | 1000 Hz | 2000 Hz |
+|--------|:-:|:-:|:-:|:-:|
+| Axial modes only | **2.5%** | **6.5%** | **2.4%** | **8.8%** |
+| Current hybrid | 31.8% | 4.6% | 1.6% | 4.6% |
+| Full analytical (145K modes) | 44.9% | 55% | 21% | 22% |
+| Modal ROM (100 modes) | 42.6% | 99% | 99% | 100% |
+| Ray tracer | 47.1% | 25% | 39% | 54% |
 
-## 3D coupling loss model
-Blends pair-specific and room-average decay:
-  gamma_eff = (1 - coupling) * gamma_pair + coupling * gamma_room
-  coupling  = 1 - A_pair / S_total
-Reduces decay rate error from 51% → 28%. Best for low-order modes (<150 Hz).
+### Why axial modes alone beat the full solution
+The 3D coupling model (gamma_eff = (1-coupling)*gamma_pair + coupling*gamma_room) acts as implicit calibration, pulling decay rates toward the measured room average. The full analytical modes are more physically correct but more sensitive to absorption input values.
 
-## BRAS data downloaded (bras_data/, gitignored)
-- CR2 seminar room: 10 dodecahedron RIRs, surface absorption CSVs
-- CR3 chamber music hall: ready for Phase 4
-- CR4 auditorium: ready for Phase 4
-- Documentation PDF
+### Architecture principle established
+Materials are continuous alpha(f) functions, never octave bands internally. Each mode evaluates absorption at its specific eigenfrequency. Octave bands are measurement/validation output only.
 
-## Measured ground truth (from BRAS CR2 WAVs)
-- Broadband: T30=1.663s, EDT=1.166s, C80=2.8dB
-- 250 Hz: T30=1.746s, 500 Hz: T30=2.024s, 1kHz: T30=1.939s
-- 2 kHz: T30=1.745s, 4 kHz: T30=1.563s
+## What works
+- Axial mode frequencies match measured: 88% (35/40 within ±3 Hz)
+- Decay rates with coupling model: 28% mean error (down from 51%)
+- Position dependence: 16.4 dB spread confirmed across receivers
+- Air absorption (ISO 9613-1): reduces high-freq T30 error by 10-20 pp
+- MaterialFunction + per-mode spectral decay: correct architecture
+- Per-surface weight decomposition: microsecond material recalculation
 
-## Current metrics (unchanged from 2026-03-31)
-- Modal ROM: 0.6% T30 error on BRAS CR2 at 250 Hz
-- Hybrid: 1.7-6% T30 error at 250-1000 Hz
+## What needs work
+- **Absorption calibration**: BRAS fitted values are calibrated for different simulator; need calibration with our modal physics
+- **Full analytical modes**: correct physics (Kuttruff) but needs right alpha values
+- **Synthesis speed**: 107K modes × 132K samples = 79s in Python loop; needs vectorization
+- **Hybrid blend**: level-matching between engines is diluting good results
 
-## Phase 3 first run results
-- Broadband T30: **3.0% error — PASS**
-- Octave-band T30 (250-4000 Hz): 20-67% error — FAIL
-- Root cause: FI impedance gives single alpha per surface; real materials absorb more at higher freq
-- Ray tracer + axial modes need frequency-dependent absorption per octave band
+## Next session priorities
+1. **Vectorize synthesis** — chunked numpy for 100K+ modes
+2. **Calibrate with full analytical modes** — use catalog priors + regularization
+3. **Integrate ISM** for early reflections with analytical modes for late field
+4. **Phase 3 re-test** with calibrated full-spectrum approach
+5. **Phase 2 (other PC)**: frequency-domain ROM greedy basis
 
-## Commits this session (feature/axial-modes branch, 9 commits)
-- 658c71d: Axial mode engine + project documentation
-- 846327d: Phase 3 BRAS test + measured ground truth from WAVs
-- 0e5d2d7: Axial mode verification vs BRAS measured RIRs (88% spectral match)
-- db7fa0c: 3D coupling loss model (decay error 51% → 28%)
-- 0b352e0: Housekeeping: session summary, spec doc, verification plot
-- e563949: Phase 3 first run results (broadband 3%, octave-band 20-67%)
-- 4e149f6: Housekeeping: metrics, roadmap, session summary
-- 523eaf3: Note on per-surface calibration approach
-- c5a3404: Per-surface absorption calibration tool (1-8.5% RMS T30 error)
-- 648090e: Final session summary
-- 523eaf3: Note on calibration approach
-- 25b0256: MaterialFunction — freq-dep absorption at arbitrary resolution
-
-## Per-surface absorption calibration
-Inverse problem: modal decay rate decomposes by surface as
-  gamma_i = sum_s( w_s_i / Z_s )
-where w_s_i is precomputed once. Changing materials only rescales — no
-re-eigensolve, no IR synthesis. Microsecond recalculation.
-
-Calibration results (BRAS CR2, 10 RIRs, 4 bands):
-  250 Hz: 8.5% RMS error (per-surface variation detected)
-  500 Hz: 1.9%, 1000 Hz: 2.1%, 2000 Hz: 1.0%
-
-Same decomposition enables real-time material A/B comparison and
-parametric optimization.
-
-## Next steps
-- **Wire calibrated per-band alpha into hybrid pipeline** — the Phase 3
-  gap (20-67% octave-band T30 error) is caused by FI single-alpha model.
-  Calibrated per-band values exist, need to propagate to ray tracer +
-  axial modes on a per-band basis.
-- **Phase 2** (other PC): frequency-domain ROM greedy basis enrichment
-- **Phase 4**: Non-shoebox validation (CR3/CR4 data downloaded)
+## Commits
+658c71d, 846327d, 0e5d2d7, db7fa0c, 0b352e0, e563949, 4e149f6, 523eaf3,
+c5a3404, 648090e, 25b0256, 22abc56, 0272442, 2a68f83, 39b6609, 2b3f9cb,
+bcbb8ac, 25cf323, ec3907f
