@@ -472,6 +472,115 @@ class Room:
 
         return ImpulseResponse(ir_total, sr, ir_modal=ir_low, ir_ism=ir_high)
 
+    def impulse_response_unified(self, source, receiver, T=3.5, sigma=0.3,
+                                  f_max_modes=2000):
+        """
+        Compute IR using the unified modal synthesis pipeline.
+
+        All engines contribute modes to a shared list. One synthesis pass.
+        No crossover filters, no frequency-domain blending artifacts.
+
+        Engines registered automatically based on room type:
+          - Analytical modes (box rooms): exact axial + tangential + oblique
+          - Modal ROM (eigensolve): high-accuracy low-freq modes
+          - Axial modes (any room): parallel surface detection
+          - ISM (box rooms): early specular reflections (non-modal)
+
+        Parameters
+        ----------
+        source : (x, y, z)
+        receiver : (x, y, z)
+        T : float
+            IR duration [s].
+        sigma : float
+            Source pulse width [m].
+        f_max_modes : float
+            Maximum frequency for analytical modes [Hz].
+        """
+        if not self._built:
+            raise RuntimeError("Call build() first")
+
+        from .unified_modes import (
+            UnifiedModalSynthesizer, AnalyticalModesProvider,
+            ModalROMProvider, AxialModesProvider)
+
+        t0_total = _time.perf_counter()
+        synth = UnifiedModalSynthesizer(sr=self.sr, c=343.0)
+
+        # Resolve materials to MaterialFunction objects
+        materials = {}
+        for label in (['floor', 'ceiling', 'left', 'right', 'front', 'back']
+                      if self._geometry_type == 'box'
+                      else self._get_labels()):
+            materials[label] = self._resolve_material_function(label)
+
+        # Register engines based on room type
+        if self._geometry_type == 'box' and self._dimensions is not None:
+            # Box room: analytical modes give exact solution at any freq
+            from .analytical_modes import AnalyticalRoomModes
+            arm = AnalyticalRoomModes(*self._dimensions, f_max=f_max_modes)
+            synth.register(AnalyticalModesProvider(arm))
+            print(f"  Engines: analytical ({arm.n_modes} modes, "
+                  f"{arm.n_axial}A+{arm.n_tangential}T+{arm.n_oblique}O "
+                  f"up to {f_max_modes}Hz)")
+        else:
+            # Non-box: use eigensolve + axial
+            if self._eigenvalues is not None:
+                synth.register(ModalROMProvider(
+                    self._eigenvalues, self._eigenvectors, self._frequencies,
+                    self.mesh, self.ops, self._surface_weights))
+                print(f"  Engines: modal_rom ({len(self._eigenvalues)} modes "
+                      f"up to {self._frequencies[-1]:.0f}Hz)")
+
+            if self._parallel_pairs:
+                synth.register(AxialModesProvider(
+                    self._parallel_pairs, self._volume, self._surface_area))
+                print(f"           axial ({len(self._parallel_pairs)} pairs)")
+
+        # ISM early reflections (box rooms)
+        if self._geometry_type == 'box' and self._dimensions is not None:
+            Lx, Ly, Lz = self._dimensions
+            alpha_w = self._get_wall_alpha()
+
+            def ism_func(src, rec, mats):
+                from .image_source import image_sources_shoebox
+                ir_ism, _ = image_sources_shoebox(
+                    Lx, Ly, Lz, src, rec,
+                    max_order=15, alpha_walls=alpha_w, sr=self.sr, T=T)
+                # Window to early reflections only (first 80ms)
+                n = len(ir_ism)
+                n_early = min(int(0.08 * self.sr), n)
+                fade = int(0.02 * self.sr)
+                window = np.ones(n)
+                if n_early + fade < n:
+                    window[n_early:n_early + fade] = np.linspace(1, 0, fade)
+                    window[n_early + fade:] = 0
+                return ir_ism * window
+
+            synth.set_ism(ism_func)
+            print(f"           ISM (early reflections)")
+
+        # Synthesize
+        t0 = _time.perf_counter()
+        ir_obj, merged = synth.impulse_response(
+            source, receiver, materials, T=T,
+            humidity=self.humidity, temperature=self.temperature,
+            sigma=sigma)
+        t_synth = _time.perf_counter() - t0
+        t_total = _time.perf_counter() - t0_total
+
+        # Count by engine
+        engines = {}
+        for m in merged:
+            eng = str(m['source_engine'])
+            engines[eng] = engines.get(eng, 0) + 1
+        eng_str = ', '.join(f"{k}:{v}" for k, v in sorted(engines.items()))
+
+        print(f"  Modes: {len(merged)} ({eng_str})")
+        print(f"  Synth: {t_synth:.1f}s, Total: {t_total:.1f}s")
+
+        return ir_obj
+
     # ============================================================
     # Internal: mesh building
     # ============================================================
