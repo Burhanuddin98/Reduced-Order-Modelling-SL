@@ -148,19 +148,25 @@ def calibrate_spectral(room, baseline_mats, rir_dir,
         scaled = {}
         for i, label in enumerate(surface_labels):
             base = baseline_mats[label]
-            s = np.clip(scale_vec[i], 0.1, 10.0)
+            s = np.clip(scale_vec[i], 0.3, 3.0)
             new_alphas = np.clip(base.alphas * s, 0.001, 0.999)
             scaled[label] = MaterialFunction(
                 base.freqs, new_alphas, name=f"{base.name}_x{s:.2f}")
         return scaled
 
+    # Regularization: penalize deviation from scale=1 (baseline values)
+    # lambda controls tradeoff: higher = stay closer to baseline
+    reg_lambda = 0.5  # moderate regularization
+
     def objective(scale_vec):
-        """Total T30 residual across all bands and positions."""
+        """Total T30 residual + regularization penalty."""
         scaled_mats = make_scaled_mats(scale_vec)
 
-        # Compute spectral modal decay
+        # Compute spectral modal decay (with air absorption)
         gamma = compute_modal_decay_spectral(
-            weights, scaled_mats, eigen_freqs, c=c)
+            weights, scaled_mats, eigen_freqs, c=c,
+            humidity=getattr(room, 'humidity', 50.0),
+            temperature=getattr(room, 'temperature', 20.0))
 
         # Room-average gamma for axial coupling
         mean_alpha = np.mean([scaled_mats[l](500.0) for l in surface_labels])
@@ -225,11 +231,14 @@ def calibrate_spectral(room, baseline_mats, rir_dir,
                 total_err += (t30_sim - meas_vals[k]) ** 2
                 n_comparisons += 1
 
-        return total_err
+        # Regularization: penalize log-deviation from scale=1
+        # Using log-scale so that x2 and x0.5 are penalized equally
+        reg = reg_lambda * np.sum(np.log(scale_vec) ** 2) * n_comparisons
+        return total_err + reg
 
     # Optimize: scale factors starting at 1.0
     x0 = np.ones(len(surface_labels))
-    bounds = [(0.1, 10.0)] * len(surface_labels)
+    bounds = [(0.3, 3.0)] * len(surface_labels)  # max 3x deviation from baseline
 
     if verbose:
         print(f"\n  Optimizing {len(surface_labels)} scale factors "
