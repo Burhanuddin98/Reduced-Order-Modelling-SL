@@ -207,7 +207,8 @@ def detect_parallel_surfaces_box(dimensions):
 
 def axial_mode_ir(pairs, source, receiver, material_map, default_material='plaster',
                   T=3.5, sr=44100, f_min=None, f_max=8000, c=343.0,
-                  room_volume=None, room_surface_area=None):
+                  room_volume=None, room_surface_area=None,
+                  humidity=50.0, temperature=20.0):
     """
     Synthesize impulse response from axial modes between parallel surfaces.
 
@@ -391,6 +392,10 @@ def axial_mode_ir(pairs, source, receiver, material_map, default_material='plast
             gamma_n = (1.0 - coupling) * gamma_pair + coupling * gamma_room
         else:
             gamma_n = gamma_pair
+
+        # Air absorption: m_air * c per mode
+        from .material_function import air_absorption_coefficient
+        gamma_n = gamma_n + air_absorption_coefficient(freqs, humidity, temperature) * c
 
         # Angular frequencies
         omega_n = 2.0 * np.pi * freqs

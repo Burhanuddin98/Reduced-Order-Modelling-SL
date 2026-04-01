@@ -124,6 +124,8 @@ class Room:
         self._surface_area = 0
         self._dimensions = None  # for box rooms: (Lx, Ly, Lz)
         self.sr = 44100
+        self.humidity = 50.0      # relative humidity [%]
+        self.temperature = 20.0   # temperature [degrees C]
 
     # ============================================================
     # Construction
@@ -376,7 +378,8 @@ class Room:
                 self._materials, self._default_material,
                 T=T, sr=sr, f_min=f_cross, f_max=8000,
                 room_volume=self._volume,
-                room_surface_area=self._surface_area)
+                room_surface_area=self._surface_area,
+                humidity=self.humidity, temperature=self.temperature)
             ir_axial_raw = ir_axial_raw[:n_samples]
 
             # Band-pass filter: f_cross to 8kHz
@@ -560,7 +563,8 @@ class Room:
             mat_funcs[label] = self._resolve_material_function(label)
 
         return compute_modal_decay_spectral(
-            self._surface_weights, mat_funcs, self._frequencies, c=343.0)
+            self._surface_weights, mat_funcs, self._frequencies, c=343.0,
+            humidity=self.humidity, temperature=self.temperature)
 
     def _build_impedance(self):
         """Build per-node impedance from material assignments (FI legacy path)."""

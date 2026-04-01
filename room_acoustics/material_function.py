@@ -138,13 +138,40 @@ class MaterialFunction:
                 f"alpha=[{self.alphas.min():.3f}, {self.alphas.max():.3f}])")
 
 
-def compute_modal_decay_spectral(weights, material_functions, eigenfrequencies,
-                                  c=343.0):
+def air_absorption_coefficient(f, humidity=50.0, temperature=20.0):
     """
-    Compute per-mode decay rates using frequency-dependent absorption.
+    Air absorption coefficient (ISO 9613-1 simplified).
+
+    Parameters
+    ----------
+    f : float or array
+        Frequency [Hz].
+    humidity : float
+        Relative humidity [%].
+    temperature : float
+        Temperature [degrees C].
+
+    Returns
+    -------
+    m : float or array
+        Absorption coefficient [Nepers/m].
+        Multiply by c to get decay rate [1/s].
+    """
+    f = np.asarray(f, dtype=float)
+    # Simplified ISO 9613-1 formula
+    m = 5.5e-4 * (50.0 / max(humidity, 10.0)) * (f / 1000.0) ** 1.7
+    return m
+
+
+def compute_modal_decay_spectral(weights, material_functions, eigenfrequencies,
+                                  c=343.0, humidity=50.0, temperature=20.0):
+    """
+    Compute per-mode decay rates using frequency-dependent absorption
+    and air absorption.
 
     Each mode's decay rate uses the material absorption evaluated at
-    that mode's specific eigenfrequency — no band binning.
+    that mode's specific eigenfrequency, plus air absorption at that
+    frequency. No band binning.
 
     Parameters
     ----------
@@ -156,23 +183,31 @@ def compute_modal_decay_spectral(weights, material_functions, eigenfrequencies,
         Eigenfrequencies in Hz.
     c : float
         Speed of sound.
+    humidity : float
+        Relative humidity [%]. Default 50%.
+    temperature : float
+        Temperature [degrees C]. Default 20.
 
     Returns
     -------
     gamma : array (n_modes,)
-        Decay rate per mode.
+        Decay rate per mode (wall absorption + air absorption).
     """
     rho_c = 1.2 * c
     labels = list(weights.keys())
     n_modes = len(weights[labels[0]])
     gamma = np.zeros(n_modes)
 
+    # Wall absorption: per-surface, per-mode
     for label in labels:
         if label not in material_functions:
             continue
         mat = material_functions[label]
-        # Evaluate absorption at each mode's eigenfrequency
         Z_per_mode = mat.impedance(eigenfrequencies, rho_c=rho_c)
         gamma += weights[label] / Z_per_mode
+
+    # Air absorption: volumetric, frequency-dependent
+    m_air = air_absorption_coefficient(eigenfrequencies, humidity, temperature)
+    gamma += m_air * c
 
     return gamma
