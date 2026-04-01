@@ -209,9 +209,9 @@ def synthesize_ir(modes, T=3.0, sr=44100, ism_ir=None):
     active = modes[mask]
 
     if len(active) > 0:
-        amp = active['amplitude'].copy()
-        gam = active['decay_rate'].copy()
-        wd = active['omega_d'].copy()
+        amp = np.ascontiguousarray(active['amplitude'], dtype=np.float64)
+        gam = np.ascontiguousarray(active['decay_rate'], dtype=np.float64)
+        wd = np.ascontiguousarray(active['omega_d'], dtype=np.float64)
 
         # Per-mode early termination at -80 dB
         safe_gamma = np.maximum(gam, 0.01)
@@ -224,12 +224,25 @@ def synthesize_ir(modes, T=3.0, sr=44100, ism_ir=None):
         amp, gam, wd, nc = amp[sig], gam[sig], wd[sig], nc[sig]
 
         if len(amp) > 0:
+            # Force exact dtypes Numba expects (avoids recompilation)
+            amp = np.array(amp, dtype=np.float64, copy=False)
+            gam = np.array(gam, dtype=np.float64, copy=False)
+            wd = np.array(wd, dtype=np.float64, copy=False)
+            nc = np.array(nc, dtype=np.int64)
+
+            _use_numba = False
             try:
                 from .analytical_modes import _synthesize_numba, _HAVE_NUMBA
-            except ImportError:
-                from room_acoustics.analytical_modes import _synthesize_numba, _HAVE_NUMBA
-            if _HAVE_NUMBA:
-                ir = _synthesize_numba(ir, amp, gam, wd, nc, dt)
+                _use_numba = _HAVE_NUMBA
+            except Exception:
+                try:
+                    from room_acoustics.analytical_modes import _synthesize_numba, _HAVE_NUMBA
+                    _use_numba = _HAVE_NUMBA
+                except Exception:
+                    pass
+
+            if _use_numba:
+                ir = _synthesize_numba(ir, amp, gam, wd, nc, float(dt))
             else:
                 _synthesize_numpy(ir, amp, gam, wd, nc, dt, sr, n_samples)
 
