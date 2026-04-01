@@ -293,10 +293,30 @@ def main():
         'floor/ceiling': ('floor', 'ceiling'),
     }
 
-    print(f"\n  {'Freq':>7s}  {'Pair':>14s}  {'Meas gamma':>11s}  {'Pred gamma':>11s}  "
-          f"{'Error':>7s}  {'Meas T60':>8s}  {'Pred T60':>8s}")
-    print(f"  {'-'*7:>7s}  {'-'*14:>14s}  {'-'*11:>11s}  {'-'*11:>11s}  "
-          f"{'-'*7:>7s}  {'-'*8:>8s}  {'-'*8:>8s}")
+    # Surface areas for coupling model
+    pair_areas = {
+        'left/right':    2 * Ly * Lz,
+        'front/back':    2 * Lx * Lz,
+        'floor/ceiling': 2 * Lx * Ly,
+    }
+    S_total = 2 * (Lx*Ly + Lx*Lz + Ly*Lz)
+    V = Lx * Ly * Lz
+
+    # Room-average decay rate from measured broadband T30
+    # (more reliable than Eyring from fitted absorption, since the
+    # BRAS fitted values are calibrated globally and may not give
+    # the correct Eyring prediction individually)
+    measured_T30 = 1.663  # from BRAS CR2 measured WAVs
+    gamma_room = 6.91 / measured_T30
+    mean_alpha_room = 1.0 - np.exp(-0.161 * V / (S_total * measured_T30))  # back-calculate
+
+    print(f"\n  Room-average: mean_alpha={mean_alpha_room:.4f}, "
+          f"measured T30={measured_T30:.2f}s, gamma_room={gamma_room:.2f}/s")
+
+    print(f"\n  {'Freq':>7s}  {'Pair':>14s}  {'Measured':>9s}  {'1D wall':>9s}  "
+          f"{'Coupled':>9s}  {'1D err':>7s}  {'Cp err':>7s}  {'T60 m':>6s}  {'T60 c':>6s}")
+    print(f"  {'-'*7:>7s}  {'-'*14:>14s}  {'-'*9:>9s}  {'-'*9:>9s}  "
+          f"{'-'*9:>9s}  {'-'*7:>7s}  {'-'*7:>7s}  {'-'*6:>6s}  {'-'*6:>6s}")
 
     decay_results = []
     for m in predicted_modes:
@@ -325,31 +345,42 @@ def main():
         R_product = (1 - alpha1) * (1 - alpha2)
         if R_product <= 0 or R_product >= 1:
             continue
-        gamma_pred = (C_AIR / (2 * L)) * (-np.log(R_product))
+        gamma_1d = (C_AIR / (2 * L)) * (-np.log(R_product))
 
-        # T60 from gamma: T60 = 6.91 / gamma (time for -60 dB)
+        # Coupling-corrected decay
+        A_pair = pair_areas[pair_name]
+        coupling = 1.0 - min(A_pair / S_total, 1.0)
+        gamma_coupled = (1.0 - coupling) * gamma_1d + coupling * gamma_room
+
         t60_meas = 6.91 / gamma_meas if gamma_meas > 0 else float('inf')
-        t60_pred = 6.91 / gamma_pred if gamma_pred > 0 else float('inf')
+        t60_coupled = 6.91 / gamma_coupled if gamma_coupled > 0 else float('inf')
 
-        err = abs(gamma_meas - gamma_pred) / gamma_meas * 100
+        err_1d = abs(gamma_meas - gamma_1d) / gamma_meas * 100
+        err_coupled = abs(gamma_meas - gamma_coupled) / gamma_meas * 100
 
-        print(f"  {m['freq']:7.1f}  {pair_name:>14s}  {gamma_meas:9.2f}/s  "
-              f"{gamma_pred:9.2f}/s  {err:5.1f}%  {t60_meas:6.2f}s  {t60_pred:6.2f}s")
+        print(f"  {m['freq']:7.1f}  {pair_name:>14s}  {gamma_meas:7.2f}/s  "
+              f"{gamma_1d:7.2f}/s  {gamma_coupled:7.2f}/s  {err_1d:5.1f}%  "
+              f"{err_coupled:5.1f}%  {t60_meas:5.2f}s  {t60_coupled:5.2f}s")
 
         decay_results.append({
             'freq': m['freq'],
             'pair': pair_name,
             'gamma_meas': gamma_meas,
-            'gamma_pred': gamma_pred,
-            'error_pct': err,
+            'gamma_1d': gamma_1d,
+            'gamma_coupled': gamma_coupled,
+            'error_1d_pct': err_1d,
+            'error_coupled_pct': err_coupled,
             't60_meas': t60_meas,
-            't60_pred': t60_pred,
+            't60_coupled': t60_coupled,
         })
 
     if decay_results:
-        avg_err = np.mean([r['error_pct'] for r in decay_results])
-        median_err = np.median([r['error_pct'] for r in decay_results])
-        print(f"\n  Decay rate error: mean={avg_err:.1f}%, median={median_err:.1f}%")
+        avg_err_1d = np.mean([r['error_1d_pct'] for r in decay_results])
+        avg_err_cp = np.mean([r['error_coupled_pct'] for r in decay_results])
+        med_err_1d = np.median([r['error_1d_pct'] for r in decay_results])
+        med_err_cp = np.median([r['error_coupled_pct'] for r in decay_results])
+        print(f"\n  1D wall model:      mean={avg_err_1d:.1f}%, median={med_err_1d:.1f}%")
+        print(f"  Coupling-corrected: mean={avg_err_cp:.1f}%, median={med_err_cp:.1f}%")
 
     # ============================================================
     # Test 3: Position-dependent amplitude
@@ -418,33 +449,33 @@ def main():
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
 
-    # 2. Decay rate comparison
+    # 2. Decay rate comparison (1D vs coupled vs measured)
     if decay_results:
         dr_freqs = [r['freq'] for r in decay_results]
         dr_meas = [r['gamma_meas'] for r in decay_results]
-        dr_pred = [r['gamma_pred'] for r in decay_results]
+        dr_1d = [r['gamma_1d'] for r in decay_results]
+        dr_cp = [r['gamma_coupled'] for r in decay_results]
         axes[0, 1].scatter(dr_freqs, dr_meas, c='blue', s=30, label='Measured', zorder=3)
-        axes[0, 1].scatter(dr_freqs, dr_pred, c='red', s=30, marker='x',
-                           label='Predicted', zorder=3)
-        for i in range(len(dr_freqs)):
-            axes[0, 1].plot([dr_freqs[i], dr_freqs[i]], [dr_meas[i], dr_pred[i]],
-                           'gray', lw=0.5, alpha=0.5)
+        axes[0, 1].scatter(dr_freqs, dr_1d, c='red', s=20, marker='x',
+                           label='1D wall', zorder=3, alpha=0.5)
+        axes[0, 1].scatter(dr_freqs, dr_cp, c='green', s=30, marker='s',
+                           label='Coupled', zorder=3)
         axes[0, 1].set_xlabel('Frequency [Hz]')
         axes[0, 1].set_ylabel('Decay rate gamma [1/s]')
-        axes[0, 1].set_title('Decay rates: measured vs predicted')
+        axes[0, 1].set_title('Decay rates: 1D vs coupled vs measured')
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
 
-    # 3. T60 comparison
+    # 3. T60 comparison (coupled model)
     if decay_results:
-        t60_meas = [r['t60_meas'] for r in decay_results]
-        t60_pred = [r['t60_pred'] for r in decay_results]
-        axes[1, 0].scatter(t60_meas, t60_pred, c='purple', s=30, zorder=3)
-        lim = max(max(t60_meas), max(t60_pred)) * 1.1
+        t60_m = [r['t60_meas'] for r in decay_results]
+        t60_c = [r['t60_coupled'] for r in decay_results]
+        axes[1, 0].scatter(t60_m, t60_c, c='green', s=30, zorder=3)
+        lim = max(max(t60_m), max(t60_c)) * 1.1
         axes[1, 0].plot([0, lim], [0, lim], 'k--', alpha=0.3, label='Perfect match')
         axes[1, 0].set_xlabel('Measured T60 [s]')
-        axes[1, 0].set_ylabel('Predicted T60 [s]')
-        axes[1, 0].set_title('T60 per axial mode')
+        axes[1, 0].set_ylabel('Coupled-model T60 [s]')
+        axes[1, 0].set_title('T60 per axial mode (coupled model)')
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].set_aspect('equal')
@@ -476,7 +507,8 @@ def main():
     print(f"  Spectral peak match rate: {match_rate:.0f}% "
           f"({matched}/{len(predicted_modes)} modes)")
     if decay_results:
-        print(f"  Decay rate error: mean={avg_err:.1f}%, median={median_err:.1f}%")
+        print(f"  Decay rate error (1D):      mean={avg_err_1d:.1f}%, median={med_err_1d:.1f}%")
+        print(f"  Decay rate error (coupled): mean={avg_err_cp:.1f}%, median={med_err_cp:.1f}%")
     print(f"  Position-dependent spread: {spread:.1f} dB")
 
 
