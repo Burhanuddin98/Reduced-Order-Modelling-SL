@@ -574,6 +574,62 @@ class GeneralizedModesProvider:
         return np.zeros(0, dtype=MODE_DTYPE)
 
 
+class BEMProvider:
+    """
+    Extracts modes from a BEM-ROM transfer function.
+
+    Runs the BEM-ROM online phase, finds resonance peaks in |H(f)|,
+    and converts each peak to a (frequency, amplitude, decay_rate) mode
+    compatible with the unified synthesis pipeline.
+
+    Confidence: 0.90 (full-wave surface physics, no geometric assumptions).
+
+    Usage:
+        from room_acoustics.bem_rom import BEMROM
+        from room_acoustics.bem_solver import BEMSolver
+
+        solver = BEMSolver(mesh)
+        rom = BEMROM.build(solver, src, rec, materials, f_max=4000)
+        synth.register(BEMProvider(rom))
+    """
+    name = 'bem'
+    confidence_base = 0.90
+
+    def __init__(self, bem_rom, f_min=20, f_max=4000, n_eval_freqs=400):
+        self._rom = bem_rom
+        self._f_min = f_min
+        self._f_max = f_max
+        self._n_eval_freqs = n_eval_freqs
+
+    @property
+    def frequency_range(self):
+        return (self._f_min, self._f_max)
+
+    def provide_modes(self, source, receiver, materials,
+                      c=343.0, humidity=50.0, temperature=20.0, **kw):
+        from .material_function import air_absorption_coefficient
+
+        # Extract modes from BEM transfer function peaks
+        mode_tuples = self._rom.extract_modes(
+            materials, f_min=self._f_min, f_max=self._f_max,
+            n_freqs=self._n_eval_freqs)
+
+        if not mode_tuples:
+            return np.zeros(0, dtype=MODE_DTYPE)
+
+        freqs = np.array([m[0] for m in mode_tuples])
+        amps = np.array([m[1] for m in mode_tuples])
+        gammas = np.array([m[2] for m in mode_tuples])
+
+        # Add air absorption
+        m_air = np.array([air_absorption_coefficient(f, humidity, temperature)
+                          for f in freqs])
+        gammas += m_air * c
+
+        return make_modes(freqs, amps, gammas,
+                          self.confidence_base, self.name)
+
+
 # ===================================================================
 # Orchestrator
 # ===================================================================
