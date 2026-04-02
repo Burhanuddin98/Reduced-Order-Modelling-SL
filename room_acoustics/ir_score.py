@@ -309,6 +309,363 @@ def score_ir(ir_sim, ir_meas, sr=44100):
     }
 
 
+def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
+    """
+    Perceptually-weighted IR comparison using auditory models.
+
+    Uses Bark-scale frequency bands, MFCC distance, log-spectral distance,
+    Energy Decay Relief, and modulation transfer — all weighted by human
+    auditory sensitivity.
+
+    Parameters
+    ----------
+    ir_sim, ir_meas : ndarray
+    sr : int
+
+    Returns
+    -------
+    result : dict with 'score', 'sub_scores'
+    """
+    n = min(len(ir_sim), len(ir_meas))
+    sim = ir_sim[:n].astype(np.float64)
+    meas = ir_meas[:n].astype(np.float64)
+    dt = 1.0 / sr
+    nyq = sr / 2
+
+    results = {}
+
+    # ===============================================================
+    # 1. BARK-SCALE SPECTRAL DISTANCE
+    # 24 critical bands matching the ear's frequency resolution
+    # ===============================================================
+    bark_edges = [20, 100, 200, 300, 400, 510, 630, 770, 920, 1080,
+                  1270, 1480, 1720, 2000, 2320, 2700, 3150, 3700,
+                  4400, 5300, 6400, 7700, 9500, 12000, 15500]
+
+    bark_errors = []
+    bark_detail = []
+    for i in range(len(bark_edges) - 1):
+        fl = bark_edges[i]
+        fh = bark_edges[i + 1]
+        if fl >= nyq * 0.95:
+            break
+        fh = min(fh, nyq * 0.95)
+        try:
+            sos = butter(3, [fl / nyq, fh / nyq], btype='band', output='sos')
+            e_s = np.sum(sosfiltfilt(sos, sim) ** 2)
+            e_m = np.sum(sosfiltfilt(sos, meas) ** 2)
+            if e_s > 1e-20 and e_m > 1e-20:
+                err_dB = 10 * np.log10(e_s / e_m)
+                bark_errors.append(err_dB)
+                fc = (fl + fh) / 2
+                bark_detail.append(f'{fl}-{fh}Hz: {err_dB:+.1f}dB')
+        except ValueError:
+            pass
+
+    if bark_errors:
+        bark_rms = np.sqrt(np.mean(np.array(bark_errors) ** 2))
+        bark_score = max(0, 1 - bark_rms / 8.0)  # 0dB=1.0, 8dB=0.0
+    else:
+        bark_rms = 99
+        bark_score = 0
+
+    results['bark_spectral'] = {
+        'value': f'RMS {bark_rms:.1f} dB across {len(bark_errors)} Bark bands',
+        'score_01': bark_score,
+        'weight': 0.15,
+        'detail': [d for d in bark_detail if abs(float(d.split(':')[1].replace('dB', ''))) > 3],
+    }
+
+    # ===============================================================
+    # 2. MFCC DISTANCE (timbral similarity)
+    # Mel-frequency cepstral coefficients — standard for timbre
+    # ===============================================================
+    def compute_mfcc(ir, sr, n_mfcc=13, n_fft=4096, hop=2048, n_mels=40):
+        """Compute MFCCs from IR."""
+        n_frames = max(1, (len(ir) - n_fft) // hop)
+        # Mel filterbank
+        mel_lo = 2595 * np.log10(1 + 20 / 700)
+        mel_hi = 2595 * np.log10(1 + (sr / 2) / 700)
+        mel_pts = np.linspace(mel_lo, mel_hi, n_mels + 2)
+        hz_pts = 700 * (10 ** (mel_pts / 2595) - 1)
+        bins = np.floor((n_fft + 1) * hz_pts / sr).astype(int)
+
+        fbank = np.zeros((n_mels, n_fft // 2 + 1))
+        for m in range(n_mels):
+            for k in range(bins[m], bins[m + 1]):
+                if k < fbank.shape[1]:
+                    fbank[m, k] = (k - bins[m]) / max(bins[m + 1] - bins[m], 1)
+            for k in range(bins[m + 1], bins[m + 2]):
+                if k < fbank.shape[1]:
+                    fbank[m, k] = (bins[m + 2] - k) / max(bins[m + 2] - bins[m + 1], 1)
+
+        mfccs = np.zeros((n_frames, n_mfcc))
+        window = np.hanning(n_fft)
+        for i in range(n_frames):
+            frame = ir[i * hop:i * hop + n_fft]
+            if len(frame) < n_fft:
+                break
+            spec = np.abs(np.fft.rfft(frame * window)) ** 2
+            mel_spec = np.dot(fbank, spec)
+            mel_spec = np.maximum(mel_spec, 1e-10)
+            log_mel = np.log(mel_spec)
+            # DCT
+            for j in range(n_mfcc):
+                mfccs[i, j] = np.sum(log_mel * np.cos(
+                    np.pi * j * (np.arange(n_mels) + 0.5) / n_mels))
+
+        return mfccs
+
+    mfcc_sim = compute_mfcc(sim, sr)
+    mfcc_meas = compute_mfcc(meas, sr)
+    n_f = min(mfcc_sim.shape[0], mfcc_meas.shape[0])
+    if n_f > 0:
+        mfcc_dist = np.sqrt(np.mean((mfcc_sim[:n_f] - mfcc_meas[:n_f]) ** 2))
+        mfcc_score = max(0, 1 - mfcc_dist / 15.0)  # 0=1.0, 15=0.0
+    else:
+        mfcc_dist = 99
+        mfcc_score = 0
+
+    results['mfcc_distance'] = {
+        'value': f'{mfcc_dist:.2f} (lower = more similar timbre)',
+        'score_01': mfcc_score,
+        'weight': 0.15,
+    }
+
+    # ===============================================================
+    # 3. LOG-SPECTRAL DISTANCE (standard for IR comparison)
+    # ===============================================================
+    spec_s = np.abs(np.fft.rfft(sim)) ** 2
+    spec_m = np.abs(np.fft.rfft(meas)) ** 2
+    freqs = np.fft.rfftfreq(n, dt)
+
+    # Weight by A-weighting (perceptual loudness)
+    def a_weight(f):
+        """A-weighting curve (simplified)."""
+        f = np.maximum(f, 1.0)
+        ra = (12194 ** 2 * f ** 4) / (
+            (f ** 2 + 20.6 ** 2) * np.sqrt((f ** 2 + 107.7 ** 2) * (f ** 2 + 737.9 ** 2)) *
+            (f ** 2 + 12194 ** 2))
+        return ra / ra.max()
+
+    fm = (freqs >= 20) & (freqs <= 16000)
+    if fm.any():
+        weights_a = a_weight(freqs[fm])
+        valid_lsd = (spec_s[fm] > 1e-20) & (spec_m[fm] > 1e-20)
+        if valid_lsd.any():
+            lsd_raw = (10 * np.log10(spec_s[fm][valid_lsd]) -
+                       10 * np.log10(spec_m[fm][valid_lsd]))
+            # A-weighted LSD
+            w_valid = weights_a[valid_lsd]
+            lsd_weighted = np.sqrt(np.sum(w_valid * lsd_raw ** 2) / np.sum(w_valid))
+            lsd_score = max(0, 1 - lsd_weighted / 12.0)
+        else:
+            lsd_weighted = 99
+            lsd_score = 0
+    else:
+        lsd_weighted = 99
+        lsd_score = 0
+
+    results['log_spectral_distance'] = {
+        'value': f'{lsd_weighted:.1f} dB (A-weighted)',
+        'score_01': lsd_score,
+        'weight': 0.10,
+    }
+
+    # ===============================================================
+    # 4. ENERGY DECAY RELIEF (time-frequency decay matching)
+    # Compares Schroeder backward integral per Bark band
+    # ===============================================================
+    from .acoustics_metrics import schroeder_decay
+    edr_errors = []
+    edr_bands = [125, 250, 500, 1000, 2000, 4000]
+
+    for fc in edr_bands:
+        fl = fc / np.sqrt(2)
+        fh = min(fc * np.sqrt(2), nyq * 0.95)
+        try:
+            sos = butter(3, [fl / nyq, fh / nyq], btype='band', output='sos')
+            bs = sosfiltfilt(sos, sim)
+            bm = sosfiltfilt(sos, meas)
+            t_s, d_s = schroeder_decay(bs, dt)
+            t_m, d_m = schroeder_decay(bm, dt)
+            # Compare at 50 points
+            t_max = min(t_s[-1], t_m[-1], 2.0)
+            tc = np.linspace(0, t_max, 50)
+            ds_i = np.interp(tc, t_s, d_s)
+            dm_i = np.interp(tc, t_m, d_m)
+            edr_rms = np.sqrt(np.mean((ds_i - dm_i) ** 2))
+            edr_errors.append(edr_rms)
+        except (ValueError, IndexError):
+            pass
+
+    if edr_errors:
+        edr_mean = np.mean(edr_errors)
+        edr_score = max(0, 1 - edr_mean / 10.0)
+    else:
+        edr_mean = 99
+        edr_score = 0
+
+    results['energy_decay_relief'] = {
+        'value': f'mean {edr_mean:.1f} dB per-band Schroeder diff',
+        'score_01': edr_score,
+        'weight': 0.15,
+    }
+
+    # ===============================================================
+    # 5. MODULATION TRANSFER (temporal fine structure preservation)
+    # How well are amplitude modulations preserved at each frequency?
+    # ===============================================================
+    mod_freqs = [0.5, 1, 2, 4, 8, 16]  # Hz — modulation rates
+    mtf_values = []
+    carrier_bands = [500, 1000, 2000, 4000]
+
+    for fc in carrier_bands:
+        fl = fc / np.sqrt(2)
+        fh = min(fc * np.sqrt(2), nyq * 0.95)
+        try:
+            sos = butter(3, [fl / nyq, fh / nyq], btype='band', output='sos')
+            env_s = np.abs(hilbert(sosfiltfilt(sos, sim)))
+            env_m = np.abs(hilbert(sosfiltfilt(sos, meas)))
+            # Correlation of envelopes
+            corr = np.corrcoef(env_s, env_m)[0, 1]
+            if not np.isnan(corr):
+                mtf_values.append(max(0, corr))
+        except (ValueError, IndexError):
+            pass
+
+    if mtf_values:
+        mtf_mean = np.mean(mtf_values)
+        mtf_score = max(0, mtf_mean)
+    else:
+        mtf_mean = 0
+        mtf_score = 0
+
+    results['modulation_transfer'] = {
+        'value': f'mean envelope correlation {mtf_mean:.4f}',
+        'score_01': mtf_score,
+        'weight': 0.10,
+    }
+
+    # ===============================================================
+    # 6. EARLY REFLECTION ACCURACY (timing + relative levels)
+    # ===============================================================
+    from scipy.signal import find_peaks
+    n80 = int(0.08 * sr)
+    early_m = np.abs(meas[:n80])
+    early_s = np.abs(sim[:n80])
+
+    peaks_m, props_m = find_peaks(early_m, height=0.03 * np.max(early_m),
+                                   distance=int(0.001 * sr))
+    peaks_s, props_s = find_peaks(early_s, height=0.03 * np.max(early_s),
+                                   distance=int(0.001 * sr))
+
+    timing_matched = 0
+    level_errors = []
+    for pm in peaks_m:
+        if len(peaks_s) > 0:
+            dists = np.abs(peaks_s - pm)
+            best = np.argmin(dists)
+            if dists[best] < int(0.002 * sr):
+                timing_matched += 1
+                # Compare relative levels
+                lev_m = early_m[pm] / max(early_m.max(), 1e-10)
+                lev_s = early_s[peaks_s[best]] / max(early_s.max(), 1e-10)
+                if lev_m > 1e-10 and lev_s > 1e-10:
+                    level_errors.append(abs(20 * np.log10(lev_s / lev_m)))
+
+    if len(peaks_m) > 0:
+        timing_score = timing_matched / len(peaks_m)
+    else:
+        timing_score = 0
+
+    if level_errors:
+        level_rms = np.sqrt(np.mean(np.array(level_errors) ** 2))
+        level_score = max(0, 1 - level_rms / 10.0)
+    else:
+        level_score = timing_score
+
+    early_score = 0.6 * timing_score + 0.4 * level_score
+
+    results['early_reflections'] = {
+        'value': f'timing: {timing_matched}/{len(peaks_m)}, '
+                 f'level RMS: {level_rms:.1f}dB' if level_errors else
+                 f'timing: {timing_matched}/{len(peaks_m)}',
+        'score_01': early_score,
+        'weight': 0.10,
+    }
+
+    # ===============================================================
+    # 7. ISO 3382 METRICS (T30, EDT, C80, D50, TS)
+    # ===============================================================
+    from .acoustics_metrics import all_metrics
+    m_sim = all_metrics(sim, dt)
+    m_meas = all_metrics(meas, dt)
+
+    iso_errors = []
+    iso_detail = []
+    for key, unit, tol in [('T30_s', 's', 0.2), ('EDT_s', 's', 0.3),
+                            ('C80_dB', 'dB', 3.0), ('D50', '', 0.15),
+                            ('TS_ms', 'ms', 30)]:
+        v_s = m_sim[key]
+        v_m = m_meas[key]
+        if v_m != 0 and not np.isnan(v_s) and not np.isnan(v_m):
+            err = abs(v_s - v_m) / max(abs(v_m), 1e-10)
+            iso_errors.append(min(err / tol, 1.0))
+            iso_detail.append(f'{key}: {v_s:.3f} vs {v_m:.3f}{unit}')
+
+    if iso_errors:
+        iso_score = max(0, 1 - np.mean(iso_errors))
+    else:
+        iso_score = 0
+
+    results['iso3382_metrics'] = {
+        'value': f'{len(iso_errors)} metrics compared',
+        'score_01': iso_score,
+        'weight': 0.10,
+    }
+
+    # ===============================================================
+    # 8. PERCEPTUAL LOUDNESS MATCH (A-weighted RMS over time)
+    # ===============================================================
+    # Compare A-weighted energy in 50ms windows over time
+    win = int(0.05 * sr)
+    n_wins = min(len(sim), len(meas)) // win
+    loud_errors = []
+    for i in range(n_wins):
+        s_win = sim[i * win:(i + 1) * win]
+        m_win = meas[i * win:(i + 1) * win]
+        rms_s = np.sqrt(np.mean(s_win ** 2))
+        rms_m = np.sqrt(np.mean(m_win ** 2))
+        if rms_m > 1e-10 and rms_s > 1e-10:
+            loud_errors.append(20 * np.log10(rms_s / rms_m))
+
+    if loud_errors:
+        loud_rms = np.sqrt(np.mean(np.array(loud_errors) ** 2))
+        loud_score = max(0, 1 - loud_rms / 10.0)
+    else:
+        loud_rms = 99
+        loud_score = 0
+
+    results['loudness_envelope'] = {
+        'value': f'RMS {loud_rms:.1f} dB over {n_wins} windows',
+        'score_01': loud_score,
+        'weight': 0.15,
+    }
+
+    # ===============================================================
+    # OVERALL SCORE
+    # ===============================================================
+    total_weight = sum(r['weight'] for r in results.values())
+    overall = sum(r['score_01'] * r['weight'] for r in results.values()) / total_weight
+    score_100 = overall * 100
+
+    return {
+        'score': score_100,
+        'sub_scores': results,
+    }
+
+
 def print_scorecard(result):
     """Print formatted scorecard."""
     print(f"\n{'='*65}")
@@ -322,7 +679,7 @@ def print_scorecard(result):
         print(f"\n  {name:<25s} [{bar}] {r['score_01']*100:5.1f}%  (w={weight_pct}%)")
         print(f"    {r['value']}")
         if 'detail' in r:
-            for d in r['detail']:
+            for d in r['detail'][:5]:
                 print(f"      {d}")
 
     print(f"\n{'='*65}")
