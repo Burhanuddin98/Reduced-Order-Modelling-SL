@@ -217,6 +217,7 @@ Include:
 
 - **Session summaries are mandatory** — write one per working session before the final push
 - **No long sleeps** — when waiting for processes, check periodically with short intervals
+- **Long tasks (>5 min)** — always state the expected completion time (e.g., "ETA: 11:44, ~3 min remaining")
 - **Terse responses** — keep explanations concise, no trailing summaries
 - **Validation before push** — run validate.py before every push, no exceptions
 - **Theory docs stay current** — if you change a formulation, update THEORY.md
