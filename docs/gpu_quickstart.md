@@ -13,6 +13,110 @@ pip install numpy scipy numba cupy-cuda12x matplotlib
 # (adjust cupy-cuda12x to match your CUDA version: cupy-cuda11x, cupy-cuda12x, etc.)
 ```
 
+## Full FDTD IR on GPU (the key experiment)
+
+This is the most important test — a physically complete IR from the wave equation,
+no noise, no energy matching hacks. Should produce natural C80 and correct
+early/late balance directly from the physics.
+
+```bash
+cd room_acoustics
+python -c "
+import sys, os, time
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('.'))))
+sys.path.insert(0, '..')
+from room_acoustics.voxelize import voxelize_box, find_boundary_voxels
+from room_acoustics.fdtd import FDTDSolver
+from room_acoustics.material_function import MaterialFunction
+from room_acoustics.acoustics_metrics import all_metrics
+from room_acoustics.ir_score import score_ir_perceptual, print_scorecard
+from room_acoustics.spectral_tools import load_wav, compare_irs
+from scipy.signal import resample
+import scipy.io.wavfile as wavfile
+import numpy as np
+
+csv_dir = '../bras_data/3 Surface descriptions/_csv/fitted_estimates'
+mats = {
+    'floor':   MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_floor.csv').with_structural_absorption(200, 0.3, 0.05),
+    'ceiling': MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_ceiling.csv').with_structural_absorption(5, 0.3, 0.1),
+    'front':   MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_concrete.csv').with_structural_absorption(200, 0.1, 0.03),
+    'back':    MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_concrete.csv').with_structural_absorption(200, 0.1, 0.03),
+    'left':    MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_windows.csv').with_structural_absorption(8, 0.02, 0.08),
+    'right':   MaterialFunction.from_csv(f'{csv_dir}/mat_CR2_plaster.csv').with_structural_absorption(10, 0.08, 0.05),
+}
+
+Lx, Ly, Lz = 8.4, 6.7, 3.0
+src = (2.0, 3.35, 1.5); rec = (6.0, 2.0, 1.2)
+dx = 0.05  # 5cm voxels -> f_max ~3.4 kHz
+
+print('Voxelizing...')
+air, origin, _ = voxelize_box(Lx, Ly, Lz, dx=dx, padding=3)
+print(f'  Grid: {air.shape}, air: {air.sum()}')
+
+# Per-voxel absorption
+bndy_ijk, bndy_normals = find_boundary_voxels(air)
+alpha_3d = np.zeros(air.shape, dtype=np.float32)
+ox, oy, oz = origin
+for idx in range(len(bndy_ijk)):
+    i, j, k = bndy_ijk[idx]
+    normal = bndy_normals[idx]
+    if abs(normal[2]) > 0.5:
+        mat = mats['floor'] if normal[2] < 0 else mats['ceiling']
+    elif abs(normal[0]) > 0.5:
+        mat = mats['left'] if normal[0] < 0 else mats['right']
+    else:
+        mat = mats['front'] if normal[1] < 0 else mats['back']
+    alpha_3d[i, j, k] = mat(500.0)
+
+# USE GPU
+print('Creating FDTD solver (GPU)...')
+solver = FDTDSolver(air, dx=dx, c=343.0, CFL=0.4, use_gpu=True)
+solver.set_materials(alpha_3d=alpha_3d)
+
+src_ijk = (int(round((src[0]-ox)/dx)), int(round((src[1]-oy)/dx)), int(round((src[2]-oz)/dx)))
+rec_ijk = (int(round((rec[0]-ox)/dx)), int(round((rec[1]-oy)/dx)), int(round((rec[2]-oz)/dx)))
+print(f'  fs={solver.fs:.0f}Hz, GPU={solver.use_gpu}')
+
+print('Running FDTD (3.5s)...')
+t0 = time.perf_counter()
+ir_fdtd, fs_fdtd = solver.impulse_response(src_ijk, rec_ijk, duration=3.5, warmup_steps=32)
+dt_run = time.perf_counter() - t0
+print(f'  Done: {dt_run:.1f}s, {len(ir_fdtd)} samples at {fs_fdtd}Hz')
+
+# Resample to 44100 Hz
+ir_44k = resample(ir_fdtd, int(len(ir_fdtd) * 44100 / fs_fdtd)).astype(np.float64)
+sr = 44100
+
+# Save
+ir_out = ir_44k.astype(np.float32)
+ir_out = ir_out / max(abs(ir_out).max(), 1e-10) * 0.95
+wavfile.write('../results/IR_fdtd_gpu_full.wav', sr, ir_out)
+print(f'  Saved: results/IR_fdtd_gpu_full.wav')
+
+# Score against measured
+rir_dir = '../bras_data/1 Scene descriptions/CR2 small room (seminar room)/RIRs/wav'
+ir_meas, _ = load_wav(f'{rir_dir}/CR2_RIR_LS1_MP1_Dodecahedron.wav')
+n = min(len(ir_44k), len(ir_meas))
+
+m = all_metrics(ir_44k[:n], 1/sr)
+print(f'\\nMetrics: T30={m[\"T30_s\"]:.3f}s C80={m[\"C80_dB\"]:.1f}dB EDT={m[\"EDT_s\"]:.3f}s')
+print(f'Measured: T30=1.663s C80=1.8dB EDT=1.166s')
+
+r = score_ir_perceptual(ir_44k[:n], ir_meas[:n], sr)
+print_scorecard(r)
+
+compare_irs(ir_meas[:n], ir_44k[:n], sr=sr,
+    output='../results/fdtd_gpu_vs_measured.png',
+    title='Full FDTD (GPU, dx=0.05m, 3.5s) vs Measured')
+"
+```
+
+**Expected on RTX 2060:** ~3-5 seconds for full 3.5s IR
+**Expected on CPU:** ~6-10 minutes
+
+This is the ground truth test: if FDTD gives correct C80 and good perceptual score,
+it proves the wave equation approach works and GPU makes it practical.
+
 ## Quick test: GPU synthesis
 
 ```bash
