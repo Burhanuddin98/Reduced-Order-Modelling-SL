@@ -133,6 +133,75 @@ class MaterialFunction:
         alpha = 1.0 - R ** 2
         return cls.from_scalar(alpha, name=name)
 
+    def with_structural_absorption(self, surface_density=10.0, cavity_depth=0.08,
+                                    damping=0.05, f_blend=200.0):
+        """
+        Add structural/membrane absorption below f_blend.
+
+        Real walls vibrate — plasterboard on studs has a membrane resonance
+        where absorption spikes. This blends a mass-spring-damper model
+        with the existing alpha(f) data below f_blend Hz.
+
+        Parameters
+        ----------
+        surface_density : float
+            Wall surface density [kg/m^2]. Plasterboard: 8-12, concrete: 200+.
+        cavity_depth : float
+            Air cavity behind the surface [m]. Stud wall: 0.05-0.1m.
+        damping : float
+            Structural damping factor (0-1). Typical: 0.03-0.1.
+        f_blend : float
+            Frequency below which the structural model is blended in [Hz].
+
+        Returns
+        -------
+        MaterialFunction with structural absorption added below f_blend.
+        """
+        rho = 1.2  # air density
+        c = 343.0
+        rho_c = rho * c
+
+        # Mass-spring resonance: f_res = c/(2*pi) * sqrt(rho/(m_s * d))
+        m_s = surface_density
+        d = max(cavity_depth, 0.001)
+        K = rho * c ** 2 / d  # air spring stiffness
+        f_res = np.sqrt(K / m_s) / (2 * np.pi)
+
+        # Structural impedance: Z_wall(f) for mass-spring-damper
+        # At resonance, Z drops → absorption peaks
+        new_freqs = np.unique(np.concatenate([
+            self.freqs,
+            np.linspace(20, f_blend, 50)
+        ]))
+        new_freqs.sort()
+
+        new_alphas = self(new_freqs).copy()
+
+        for i, f in enumerate(new_freqs):
+            if f > f_blend:
+                break
+            omega = 2 * np.pi * max(f, 1.0)
+            omega_res = 2 * np.pi * f_res
+
+            # Impedance magnitude of mass-spring-damper
+            Z_mass = omega * m_s  # mass term
+            Z_spring = K / omega  # spring term
+            Z_damp = damping * 2 * m_s * omega_res  # damping term
+            Z_wall = np.sqrt((Z_mass - Z_spring) ** 2 + Z_damp ** 2)
+
+            # Absorption from wall impedance vs air impedance
+            R = (Z_wall - rho_c) / (Z_wall + rho_c)
+            alpha_struct = 1.0 - R ** 2
+
+            # Blend: smooth transition from structural to measured
+            blend = 1.0 - np.clip((f - f_blend * 0.5) / (f_blend * 0.5), 0, 1)
+            new_alphas[i] = blend * max(alpha_struct, new_alphas[i]) + (1 - blend) * new_alphas[i]
+
+        new_alphas = np.clip(new_alphas, 0.001, 0.999)
+        return MaterialFunction(new_freqs, new_alphas,
+                                name=f"{self.name}_structural",
+                                scattering=self.scatter(new_freqs))
+
     def __repr__(self):
         return (f"MaterialFunction('{self.name}', {len(self.freqs)} points, "
                 f"alpha=[{self.alphas.min():.3f}, {self.alphas.max():.3f}])")
