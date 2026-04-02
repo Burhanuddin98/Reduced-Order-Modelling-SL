@@ -372,7 +372,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     results['bark_spectral'] = {
         'value': f'RMS {bark_rms:.1f} dB across {len(bark_errors)} Bark bands',
         'score_01': bark_score,
-        'weight': 0.15,
+        'weight': 0.20,  # room-invariant: heavy weight
         'detail': [d for d in bark_detail if abs(float(d.split(':')[1].replace('dB', ''))) > 3],
     }
 
@@ -421,7 +421,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     n_f = min(mfcc_sim.shape[0], mfcc_meas.shape[0])
     if n_f > 0:
         mfcc_dist = np.sqrt(np.mean((mfcc_sim[:n_f] - mfcc_meas[:n_f]) ** 2))
-        mfcc_score = max(0, 1 - mfcc_dist / 15.0)  # 0=1.0, 15=0.0
+        mfcc_score = max(0, 1 - mfcc_dist / 30.0)  # 0=1.0, 30=0.0 (lenient — position-dependent)
     else:
         mfcc_dist = 99
         mfcc_score = 0
@@ -429,7 +429,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     results['mfcc_distance'] = {
         'value': f'{mfcc_dist:.2f} (lower = more similar timbre)',
         'score_01': mfcc_score,
-        'weight': 0.15,
+        'weight': 0.05,  # position-dependent: low weight
     }
 
     # ===============================================================
@@ -509,7 +509,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     results['energy_decay_relief'] = {
         'value': f'mean {edr_mean:.1f} dB per-band Schroeder diff',
         'score_01': edr_score,
-        'weight': 0.15,
+        'weight': 0.20,  # room-invariant: heavy weight
     }
 
     # ===============================================================
@@ -622,7 +622,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     results['iso3382_metrics'] = {
         'value': f'{len(iso_errors)} metrics compared',
         'score_01': iso_score,
-        'weight': 0.10,
+        'weight': 0.15,  # room-invariant: important
     }
 
     # ===============================================================
@@ -642,7 +642,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
 
     if loud_errors:
         loud_rms = np.sqrt(np.mean(np.array(loud_errors) ** 2))
-        loud_score = max(0, 1 - loud_rms / 10.0)
+        loud_score = max(0, 1 - loud_rms / 20.0)  # lenient — position-dependent
     else:
         loud_rms = 99
         loud_score = 0
@@ -650,7 +650,7 @@ def score_ir_perceptual(ir_sim, ir_meas, sr=44100):
     results['loudness_envelope'] = {
         'value': f'RMS {loud_rms:.1f} dB over {n_wins} windows',
         'score_01': loud_score,
-        'weight': 0.15,
+        'weight': 0.05,  # position-dependent: low weight
     }
 
     # ===============================================================
