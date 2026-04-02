@@ -129,6 +129,24 @@ Everything else is packaging. This question drives the roadmap.
 
 ---
 
+## Perceptual IR quality [IN PROGRESS]
+
+### Achieved
+- Spectral ISM: per-bounce frequency-dependent filtering + scattering smear
+- Diffuse tail: 1/3-octave decaying noise, measured-calibrated decay rates
+- Tonal balance: 4.8 dB RMS error (within natural position variation 2.8-6.2 dB)
+- Early reflection matching: 100% peak alignment (49/49 within 1ms)
+
+### Remaining
+- **80 Hz excess (+14 dB)**: rigid-wall ISM overestimates low-frequency energy
+  - Root cause: real walls vibrate (membrane absorption, structural coupling)
+  - Fix: wall impedance model for frequencies below ~200 Hz
+  - Nonlinear structural coupling (amplitude-dependent absorption at resonance)
+- **C80 mismatch** (-1.2 vs 1.8 dB): early/late energy balance needs tuning
+- **Late tail spectral shape**: diffuse noise lacks spatial coherence of real reverberation
+
+---
+
 ## Known technical debt
 
 1. **Propagator matrix breaks symplectic structure** — Schur stabilization is a workaround, not a fix. Proper solution: symplectic integrator (Stormer-Verlet) or Laplace domain
