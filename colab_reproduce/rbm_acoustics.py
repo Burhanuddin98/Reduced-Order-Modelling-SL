@@ -329,7 +329,10 @@ def _gpu_solve(c2S_gpu, M_gpu, B_gpu_br, rhs_base_gpu, N, s):
     M_pre = gpuLO((N, N), matvec=lambda x: x / prec_d, dtype=complex)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        x, _ = gpu_gmres(A, rhs, M=M_pre, tol=1e-8, maxiter=500, restart=100)
+        try:
+            x, _ = gpu_gmres(A, rhs, M=M_pre, tol=1e-8, maxiter=500, restart=100)
+        except TypeError:
+            x, _ = gpu_gmres(A, rhs, M=M_pre, atol=1e-8, maxiter=500, restart=100)
     cp.cuda.Device().synchronize()
     return x
 
