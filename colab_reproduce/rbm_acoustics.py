@@ -33,11 +33,21 @@ import warnings
 try:
     import cupy as cp
     import cupyx.scipy.sparse as csp
-    from cupyx.scipy.sparse.linalg import gmres as gpu_gmres
+    from cupyx.scipy.sparse.linalg import gmres as _raw_gpu_gmres
     from cupyx.scipy.sparse.linalg import LinearOperator as gpuLO
     HAS_GPU = True
     _gpu_name = cp.cuda.runtime.getDeviceProperties(0)['name'].decode()
     print(f"GPU: {_gpu_name}")
+    # CuPy <13 uses 'tol', CuPy >=13 uses 'atol'
+    import inspect
+    _gmres_params = inspect.signature(_raw_gpu_gmres).parameters
+    _gmres_tol_key = 'atol' if 'atol' in _gmres_params else 'tol'
+    def gpu_gmres(A, b, **kwargs):
+        if 'tol' in kwargs and _gmres_tol_key == 'atol':
+            kwargs['atol'] = kwargs.pop('tol')
+        elif 'atol' in kwargs and _gmres_tol_key == 'tol':
+            kwargs['tol'] = kwargs.pop('atol')
+        return _raw_gpu_gmres(A, b, **kwargs)
 except Exception:
     HAS_GPU = False
     print("GPU: not available, using CPU")
@@ -329,10 +339,7 @@ def _gpu_solve(c2S_gpu, M_gpu, B_gpu_br, rhs_base_gpu, N, s):
     M_pre = gpuLO((N, N), matvec=lambda x: x / prec_d, dtype=complex)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            x, _ = gpu_gmres(A, rhs, M=M_pre, tol=1e-8, maxiter=500, restart=100)
-        except TypeError:
-            x, _ = gpu_gmres(A, rhs, M=M_pre, atol=1e-8, maxiter=500, restart=100)
+        x, _ = gpu_gmres(A, rhs, M=M_pre, tol=1e-8, maxiter=500, restart=100)
     cp.cuda.Device().synchronize()
     return x
 
