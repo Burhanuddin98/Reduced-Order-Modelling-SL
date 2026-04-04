@@ -165,14 +165,18 @@ def assemble_2d(mesh):
     sMx, sMy = sparse.diags(mesh.Mx), sparse.diags(mesh.My)
     S = (sparse.kron(sMy, sparse.csr_matrix(mesh.Kx), format='csr') +
          sparse.kron(sparse.csr_matrix(mesh.Ky), sMx, format='csr'))
-    b = np.zeros(N)
-    for edge in ('bottom','top'):
+    B_labels = {}
+    for edge in ('bottom','top','left','right'):
+        b = np.zeros(N)
         nodes = mesh.boundary_nodes(edge)
-        for gx in range(mesh.Ngx): b[nodes[gx]] += mesh.Mx[gx]
-    for edge in ('left','right'):
-        nodes = mesh.boundary_nodes(edge)
-        for gy in range(mesh.Ngy): b[nodes[gy]] += mesh.My[gy]
-    return dict(M_diag=M_diag, M_inv=1.0/M_diag, S=S, B_total=sparse.diags(b))
+        if edge in ('bottom','top'):
+            for gx in range(mesh.Ngx): b[nodes[gx]] += mesh.Mx[gx]
+        else:
+            for gy in range(mesh.Ngy): b[nodes[gy]] += mesh.My[gy]
+        B_labels[edge] = b
+    b_total = sum(B_labels.values())
+    return dict(M_diag=M_diag, M_inv=1.0/M_diag, S=S,
+                B_total=sparse.diags(b_total), B_labels=B_labels)
 
 
 def assemble_3d(mesh):
@@ -184,12 +188,16 @@ def assemble_3d(mesh):
     S = (sparse.kron(sMz, sparse.kron(sMy, sKx, format='csr'), format='csr') +
          sparse.kron(sMz, sparse.kron(sKy, sMx, format='csr'), format='csr') +
          sparse.kron(sKz, sMxy, format='csr'))
-    b = np.zeros(N)
     Myz = np.kron(mesh.Mz, mesh.My)
     Mxz = np.kron(mesh.Mz, mesh.Mx)
     Mxy = np.kron(mesh.My, mesh.Mx)
-    for side in (0,1):
-        b[mesh._face_nodes(0, side)] += Myz
-        b[mesh._face_nodes(1, side)] += Mxz
-        b[mesh._face_nodes(2, side)] += Mxy
-    return dict(M_diag=M_diag, M_inv=1.0/M_diag, S=S, B_total=sparse.diags(b))
+    face_names = {(0,0):'x_min',(0,1):'x_max',(1,0):'y_min',(1,1):'y_max',(2,0):'z_min',(2,1):'z_max'}
+    face_mass = {0: Myz, 1: Mxz, 2: Mxy}
+    B_labels = {}
+    for (axis, side), label in face_names.items():
+        b = np.zeros(N)
+        b[mesh._face_nodes(axis, side)] += face_mass[axis]
+        B_labels[label] = b
+    b_total = sum(B_labels.values())
+    return dict(M_diag=M_diag, M_inv=1.0/M_diag, S=S,
+                B_total=sparse.diags(b_total), B_labels=B_labels)

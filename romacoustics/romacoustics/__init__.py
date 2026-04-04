@@ -19,6 +19,7 @@ Quick start:
 
 from romacoustics.room import Room
 from romacoustics.ir import ImpulseResponse
+from romacoustics.materials import MATERIALS, get_material, list_materials
 
-__version__ = '0.1.0'
-__all__ = ['Room', 'ImpulseResponse']
+__version__ = '0.2.0'
+__all__ = ['Room', 'ImpulseResponse', 'MATERIALS', 'get_material', 'list_materials']
