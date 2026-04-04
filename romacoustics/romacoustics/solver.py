@@ -53,6 +53,145 @@ def laplace_to_ir(H, sigma, b, t):
     return weeks_reconstruct(weeks_coefficients(H, b, z_safe), sigma, b, t)
 
 
+# ── IFFT time reconstruction ─────────────────────────────────
+
+def ifft_frequencies(f_max, N_freq):
+    """Real frequencies for IFFT reconstruction.
+
+    Returns s_values = sigma + i*2*pi*f for uniformly spaced f in [0, f_max].
+    sigma is a small damping shift to ensure convergence.
+    """
+    sigma = 5.0  # small positive shift (abscissa of convergence)
+    freqs = np.linspace(0, f_max, N_freq)
+    omega = 2 * np.pi * freqs
+    return sigma + 1j * omega, freqs, sigma
+
+
+def ifft_to_ir(H, freqs, sigma, t_max, fs=44100):
+    """Reconstruct time-domain IR from H(s) via inverse FFT.
+
+    H(s) was evaluated at s = sigma + i*omega for uniformly spaced omega.
+    The time signal is:
+        p(t) = e^{sigma*t} * IFFT[ H(sigma + i*omega) ]
+    scaled by df.
+
+    Parameters
+    ----------
+    H : complex array (N_freq,) — transfer function at real frequencies
+    freqs : array (N_freq,) — frequency values [Hz]
+    sigma : float — Laplace shift used during evaluation
+    t_max : float — desired IR duration [s]
+    fs : int — output sample rate
+
+    Returns
+    -------
+    ir : real array — impulse response at fs sample rate
+    t : array — time values
+    """
+    N_freq = len(H)
+    df = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
+
+    # Build two-sided spectrum for IFFT
+    # H is one-sided: f = [0, df, 2df, ..., f_max]
+    # Mirror to get negative frequencies (conjugate symmetry)
+    N_fft = 2 * (N_freq - 1)
+    H_full = np.zeros(N_fft, dtype=complex)
+    H_full[:N_freq] = H
+    H_full[N_freq:] = np.conj(H[-2:0:-1])  # mirror without DC and Nyquist
+
+    # IFFT
+    ir_raw = np.fft.ifft(H_full).real * N_fft * df
+
+    # The IFFT gives signal at dt = 1/(N_fft * df)
+    dt_ifft = 1.0 / (N_fft * df)
+    t_ifft = np.arange(N_fft) * dt_ifft
+
+    # Apply Laplace shift correction: p(t) = e^{sigma*t} * ifft_result
+    ir_raw *= np.exp(sigma * t_ifft)
+
+    # Resample to desired fs and t_max
+    t_out = np.arange(0, t_max, 1.0/fs)
+    ir_out = np.interp(t_out, t_ifft, ir_raw, left=0, right=0)
+
+    return ir_out, t_out
+
+
+def sweep_fi_ifft(c2S, M, B, p0, N, f_max, N_freq, Zs, rec_idx, verbose=True):
+    """FOM sweep at real frequencies for IFFT reconstruction. Returns H, freqs, sigma."""
+    s_vals, freqs, sigma = ifft_frequencies(f_max, N_freq)
+    Br = C_AIR**2 * RHO_AIR * B / Zs
+    Ns = len(s_vals)
+    H = np.zeros(Ns, dtype=complex)
+    t0 = _time.perf_counter()
+    for i, s in enumerate(s_vals):
+        H[i] = _solve_laplace(c2S, M, B, p0, N, s, Br)[rec_idx]
+        if verbose and (i+1) % max(1, Ns//10) == 0:
+            el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+            print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    if verbose:
+        print(f' done ({_time.perf_counter()-t0:.0f}s)')
+    return H, freqs, sigma
+
+
+def sweep_fd_ifft(c2S, M, B, p0, N, f_max, N_freq, sigma_flow, d_mat,
+                  rec_idx, verbose=True):
+    """FOM sweep at real frequencies for freq-dep BC + IFFT."""
+    s_vals, freqs, sigma = ifft_frequencies(f_max, N_freq)
+    Ns = len(s_vals)
+    H = np.zeros(Ns, dtype=complex)
+    t0 = _time.perf_counter()
+    for i, s in enumerate(s_vals):
+        f = max(abs(s.imag)/(2*np.pi), 1.0)
+        Ys = miki_admittance_scalar(f, sigma_flow, d_mat)
+        Br = C_AIR**2 * RHO_AIR * Ys * B
+        H[i] = _solve_laplace(c2S, M, B, p0, N, s, Br)[rec_idx]
+        if verbose and (i+1) % max(1, Ns//10) == 0:
+            el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+            print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    if verbose:
+        print(f' done ({_time.perf_counter()-t0:.0f}s)')
+    return H, freqs, sigma
+
+
+def sweep_persurface_ifft(c2S, M, B_labels, p0, N, f_max, N_freq,
+                           mat_data, rec_idx, verbose=True):
+    """FOM sweep with per-surface freq-dep absorption for IFFT.
+
+    mat_data: dict {face_label: (freqs_array, alpha_array)}
+    """
+    s_vals, freqs, sigma = ifft_frequencies(f_max, N_freq)
+    Ns = len(s_vals)
+    H = np.zeros(Ns, dtype=complex)
+    t0 = _time.perf_counter()
+    for i, s in enumerate(s_vals):
+        f = max(abs(s.imag)/(2*np.pi), 1.0)
+        Br_diag = np.zeros(N)
+        for face, (f_mat, alpha_mat) in mat_data.items():
+            a = np.clip(np.interp(min(f, f_mat[-1]), f_mat, alpha_mat), 0.001, 0.999)
+            Z = _alpha_to_Z_internal(a)
+            if face in B_labels:
+                Br_diag += C_AIR**2 * RHO_AIR * B_labels[face] / Z
+        sig, omg = s.real, s.imag
+        Kr = c2S + sparse.diags((sig**2-omg**2)*M + sig*Br_diag, format='csc')
+        Kc = sparse.diags(2*sig*omg*M + omg*Br_diag, format='csc')
+        A = sparse.bmat([[Kr,-Kc],[Kc,Kr]], format='csc')
+        rhs = np.concatenate([sig*p0*M, omg*p0*M])
+        x = spsolve(A, rhs)
+        H[i] = x[rec_idx] + 1j*x[N+rec_idx]
+        if verbose and (i+1) % max(1, Ns//10) == 0:
+            el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+            print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    if verbose:
+        print(f' done ({_time.perf_counter()-t0:.0f}s)')
+    return H, freqs, sigma
+
+
+def _alpha_to_Z_internal(alpha):
+    """Quick alpha -> Z conversion (same as materials.absorption_to_impedance)."""
+    rho_c = RHO_AIR * C_AIR
+    return rho_c * (1 + np.sqrt(1 - alpha)) / np.sqrt(alpha)
+
+
 # ── Laplace FOM ──────────────────────────────────────────────
 
 def _solve_laplace(c2S, M, B, p0, N, s, Br_diag):
