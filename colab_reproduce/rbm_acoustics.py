@@ -27,6 +27,20 @@ from scipy.sparse.linalg import spsolve
 from scipy.linalg import svd
 from numpy.polynomial import legendre
 import time as _time
+import warnings
+
+# ── GPU backend ──────────────────────────────────────────────
+try:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+    from cupyx.scipy.sparse.linalg import gmres as gpu_gmres
+    from cupyx.scipy.sparse.linalg import LinearOperator as gpuLO
+    HAS_GPU = True
+    _gpu_name = cp.cuda.runtime.getDeviceProperties(0)['name'].decode()
+    print(f"GPU: {_gpu_name}")
+except Exception:
+    HAS_GPU = False
+    print("GPU: not available, using CPU")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -290,89 +304,183 @@ def miki_absorption(f, sigma_flow, d_mat):
 
 # ═════════════════════════════════════════════════════════════
 # 5. LAPLACE-DOMAIN FOM SOLVER (Paper Eq. 9-12)
+#
+# GPU path: complex N×N system with GMRES + diagonal preconditioner
+# CPU path: real 2N×2N system with scipy spsolve (exact)
 # ═════════════════════════════════════════════════════════════
-def laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs):
-    """Solve (s²M + c²S + s·c²ρ/Zs·B) p = s·p0·M for FI boundaries."""
+
+def _cpu_solve(c2S, M_diag, B_diag, p0, N, s, Br_diag):
+    """CPU: 2N×2N real system, exact via spsolve."""
     sig, omg = s.real, s.imag
-    Br = C_AIR**2 * RHO_AIR * B_diag / Zs
-    Kr = c2S + sparse.diags((sig**2-omg**2)*M_diag + sig*Br, format='csc')
-    Kc = sparse.diags(2*sig*omg*M_diag + omg*Br, format='csc')
+    Kr = c2S + sparse.diags((sig**2-omg**2)*M_diag + sig*Br_diag.real - omg*Br_diag.imag, format='csc')
+    Kc = sparse.diags(2*sig*omg*M_diag + omg*Br_diag.real + sig*Br_diag.imag, format='csc')
     A = sparse.bmat([[Kr,-Kc],[Kc,Kr]], format='csc')
     rhs = np.concatenate([sig*p0*M_diag, omg*p0*M_diag])
     x = spsolve(A, rhs)
     return x[:N] + 1j*x[N:]
 
+
+def _gpu_solve(c2S_gpu, M_gpu, B_gpu_br, rhs_base_gpu, N, s):
+    """GPU: complex N×N GMRES with diagonal preconditioner."""
+    diag = s**2 * M_gpu + s * B_gpu_br
+    A = c2S_gpu + csp.diags(diag)
+    rhs = s * rhs_base_gpu
+    prec_d = A.diagonal()
+    M_pre = gpuLO((N, N), matvec=lambda x: x / prec_d, dtype=complex)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        x, _ = gpu_gmres(A, rhs, M=M_pre, tol=1e-8, maxiter=500, restart=100)
+    cp.cuda.Device().synchronize()
+    return x
+
+
+class GPUContext:
+    """Pre-allocated GPU arrays for fast repeated solves."""
+    def __init__(self, c2S_cpu, M_diag, B_diag, p0):
+        self.N = len(M_diag)
+        self.c2S = csp.csr_matrix(c2S_cpu.tocsr())
+        self.M = cp.asarray(M_diag, dtype=np.float64)
+        self.B = cp.asarray(B_diag, dtype=np.float64)
+        self.rhs_base = cp.asarray(p0 * M_diag, dtype=complex)
+        self._Br_cache = {}
+
+    def set_fi(self, Zs):
+        key = ('fi', Zs)
+        if key not in self._Br_cache:
+            self._Br_cache[key] = C_AIR**2 * RHO_AIR * self.B / Zs
+        self._Br = self._Br_cache[key]
+
+    def set_fd(self, f, sigma_flow, d_mat):
+        Ys = miki_admittance_scalar(f, sigma_flow, d_mat)
+        self._Br = C_AIR**2 * RHO_AIR * Ys * self.B
+
+    def solve(self, s):
+        return _gpu_solve(self.c2S, self.M, self._Br, self.rhs_base, self.N, s)
+
+    def solve_to_cpu(self, s):
+        return cp.asnumpy(self.solve(s))
+
+    def solve_at_rec(self, s, rec_idx):
+        return complex(cp.asnumpy(self.solve(s)[rec_idx]))
+
+
+def make_gpu_ctx(c2S, M_diag, B_diag, p0):
+    """Create GPU context if GPU available, else return None."""
+    if HAS_GPU:
+        return GPUContext(c2S, M_diag, B_diag, p0)
+    return None
+
+
+def laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs):
+    """Solve for FI boundaries (CPU)."""
+    Br = C_AIR**2 * RHO_AIR * B_diag / Zs
+    return _cpu_solve(c2S, M_diag, B_diag, p0, N, s, Br)
+
 def laplace_fom_fd(c2S, M_diag, B_diag, p0, N, s, sigma_flow, d_mat):
-    """Solve for freq-dependent (Miki) boundaries."""
+    """Solve for freq-dependent boundaries (CPU)."""
     f = max(abs(s.imag)/(2*np.pi), 1.0)
     Ys = miki_admittance_scalar(f, sigma_flow, d_mat)
-    sig, omg = s.real, s.imag
     Br = C_AIR**2 * RHO_AIR * Ys * B_diag
-    Kr = c2S + sparse.diags((sig**2-omg**2)*M_diag + sig*Br.real - omg*Br.imag, format='csc')
-    Kc = sparse.diags(2*sig*omg*M_diag + omg*Br.real + sig*Br.imag, format='csc')
-    A = sparse.bmat([[Kr,-Kc],[Kc,Kr]], format='csc')
-    rhs = np.concatenate([sig*p0*M_diag, omg*p0*M_diag])
-    x = spsolve(A, rhs)
-    return x[:N] + 1j*x[N:]
+    return _cpu_solve(c2S, M_diag, B_diag, p0, N, s, Br)
 
 
 def laplace_sweep_fi(c2S, M_diag, B_diag, p0, N, s_vals, Zs, rec_idx, verbose=True):
-    """Sweep over complex frequencies for FI case. Returns H(rec)."""
+    """Sweep for FI case. Auto GPU if available."""
     Ns = len(s_vals)
     H = np.zeros(Ns, dtype=complex)
     t0 = _time.perf_counter()
-    for i, s in enumerate(s_vals):
-        p = laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs)
-        H[i] = p[rec_idx]
-        if verbose and (i+1) % max(1, Ns//5) == 0:
-            el = _time.perf_counter()-t0
-            print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
-    if verbose: print(f' done ({_time.perf_counter()-t0:.0f}s)')
+    gpu = make_gpu_ctx(c2S, M_diag, B_diag, p0)
+    if gpu:
+        gpu.set_fi(Zs)
+        for i, s in enumerate(s_vals):
+            H[i] = gpu.solve_at_rec(s, rec_idx)
+            if verbose and (i+1) % max(1, Ns//10) == 0:
+                el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+                print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    else:
+        for i, s in enumerate(s_vals):
+            H[i] = laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs)[rec_idx]
+            if verbose and (i+1) % max(1, Ns//5) == 0:
+                el = _time.perf_counter()-t0
+                print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
+    if verbose:
+        el = _time.perf_counter()-t0
+        tag = 'GPU' if gpu else 'CPU'
+        print(f' done ({el:.0f}s, {el/Ns*1000:.0f}ms/pt, {tag})')
     return H
 
 
 def laplace_sweep_fd(c2S, M_diag, B_diag, p0, N, s_vals, sigma_flow, d_mat,
                      rec_idx, verbose=True):
-    """Sweep for freq-dependent case."""
+    """Sweep for freq-dependent case. Auto GPU."""
     Ns = len(s_vals)
     H = np.zeros(Ns, dtype=complex)
     t0 = _time.perf_counter()
+    gpu = make_gpu_ctx(c2S, M_diag, B_diag, p0)
     for i, s in enumerate(s_vals):
-        p = laplace_fom_fd(c2S, M_diag, B_diag, p0, N, s, sigma_flow, d_mat)
-        H[i] = p[rec_idx]
-        if verbose and (i+1) % max(1, Ns//5) == 0:
-            el = _time.perf_counter()-t0
-            print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
-    if verbose: print(f' done ({_time.perf_counter()-t0:.0f}s)')
+        if gpu:
+            f = max(abs(s.imag)/(2*np.pi), 1.0)
+            gpu.set_fd(f, sigma_flow, d_mat)
+            H[i] = gpu.solve_at_rec(s, rec_idx)
+        else:
+            H[i] = laplace_fom_fd(c2S, M_diag, B_diag, p0, N, s, sigma_flow, d_mat)[rec_idx]
+        if verbose and (i+1) % max(1, Ns//10) == 0:
+            el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+            print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    if verbose:
+        el = _time.perf_counter()-t0
+        tag = 'GPU' if gpu else 'CPU'
+        print(f' done ({el:.0f}s, {el/Ns*1000:.0f}ms/pt, {tag})')
     return H
 
 
 def laplace_sweep_fi_fullfield(c2S, M_diag, B_diag, p0, N, s_vals, Zs, verbose=True):
-    """Sweep returning full field snapshots (for basis construction)."""
+    """Full-field sweep for FI (snapshots). Auto GPU."""
     Ns = len(s_vals)
     snaps = []
     t0 = _time.perf_counter()
-    for i, s in enumerate(s_vals):
-        snaps.append(laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs))
-        if verbose and (i+1) % max(1, Ns//5) == 0:
-            el = _time.perf_counter()-t0
-            print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
-    if verbose: print(f' done ({_time.perf_counter()-t0:.0f}s)')
+    gpu = make_gpu_ctx(c2S, M_diag, B_diag, p0)
+    if gpu:
+        gpu.set_fi(Zs)
+        for i, s in enumerate(s_vals):
+            snaps.append(gpu.solve_to_cpu(s))
+            if verbose and (i+1) % max(1, Ns//10) == 0:
+                el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+                print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    else:
+        for i, s in enumerate(s_vals):
+            snaps.append(laplace_fom_fi(c2S, M_diag, B_diag, p0, N, s, Zs))
+            if verbose and (i+1) % max(1, Ns//5) == 0:
+                el = _time.perf_counter()-t0
+                print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
+    if verbose:
+        el = _time.perf_counter()-t0
+        tag = 'GPU' if gpu else 'CPU'
+        print(f' done ({el:.0f}s, {el/Ns*1000:.0f}ms/pt, {tag})')
     return snaps
 
 
 def laplace_sweep_fd_fullfield(c2S, M_diag, B_diag, p0, N, s_vals,
                                 sigma_flow, d_mat, verbose=True):
-    """Full-field sweep for freq-dependent case."""
+    """Full-field sweep for freq-dependent (snapshots). Auto GPU."""
     Ns = len(s_vals)
     snaps = []
     t0 = _time.perf_counter()
+    gpu = make_gpu_ctx(c2S, M_diag, B_diag, p0)
     for i, s in enumerate(s_vals):
-        snaps.append(laplace_fom_fd(c2S, M_diag, B_diag, p0, N, s, sigma_flow, d_mat))
-        if verbose and (i+1) % max(1, Ns//5) == 0:
-            el = _time.perf_counter()-t0
-            print(f'  {i+1}/{Ns} ({el:.0f}s)', end='', flush=True)
-    if verbose: print(f' done ({_time.perf_counter()-t0:.0f}s)')
+        if gpu:
+            f = max(abs(s.imag)/(2*np.pi), 1.0)
+            gpu.set_fd(f, sigma_flow, d_mat)
+            snaps.append(gpu.solve_to_cpu(s))
+        else:
+            snaps.append(laplace_fom_fd(c2S, M_diag, B_diag, p0, N, s, sigma_flow, d_mat))
+        if verbose and (i+1) % max(1, Ns//10) == 0:
+            el = _time.perf_counter()-t0; eta = el/(i+1)*(Ns-i-1)
+            print(f'  {i+1}/{Ns} ({el:.0f}s, ETA {eta:.0f}s)', end='', flush=True)
+    if verbose:
+        el = _time.perf_counter()-t0
+        tag = 'GPU' if gpu else 'CPU'
+        print(f' done ({el:.0f}s, {el/Ns*1000:.0f}ms/pt, {tag})')
     return snaps
 
 
