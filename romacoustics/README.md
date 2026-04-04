@@ -1,8 +1,7 @@
 <p align="center">
-  <h1 align="center">romacoustics</h1>
+  <img src="logo.png" alt="romacoustics" width="400">
   <p align="center">
-    <strong>Reduced Order Modelling for Room Acoustics</strong><br>
-    100-10,000x faster impulse responses with parametric boundaries
+    <strong>100-10,000x faster impulse responses with parametric boundaries</strong>
   </p>
   <p align="center">
     <a href="#install">Install</a> &bull;
