@@ -17,37 +17,62 @@ from romacoustics.materials import absorption_to_impedance, get_material
 
 
 class ROM:
-    """Pre-built reduced order model for fast parametric queries."""
+    """Pre-built reduced order model for fast parametric queries.
 
-    def __init__(self, rom_ops, s_vals, sigma_w, b_w, fs, t_max, bc_type,
-                 sigma_flow=None):
+    Supports per-surface material variation via affine decomposition:
+    Online assembly: Br_r = sum_label (1/Z_label) * Br_r_label
+    """
+
+    def __init__(self, rom_ops, s_vals, freqs, sigma, fs, t_max,
+                 bc_type='PER_SURFACE', material_map=None, B_labels_keys=None):
         self.rom_ops = rom_ops
         self.s_vals = s_vals
-        self.sigma_w = sigma_w
-        self.b_w = b_w
+        self.freqs = freqs
+        self.sigma = sigma
         self.fs = fs
         self.t_max = t_max
         self.bc_type = bc_type
-        self.sigma_flow = sigma_flow
-        self.t_eval = np.arange(0, t_max, 1.0/fs)
+        self.material_map = material_map or {}
+        self.B_labels_keys = B_labels_keys or []
         self.Nrb = rom_ops['M_r'].shape[0]
 
-    def solve(self, Zs=None, d_mat=None):
-        """Evaluate ROM at new parameter value. Returns ImpulseResponse."""
-        if self.bc_type == 'FI':
-            if Zs is None:
-                raise ValueError('Zs required for FI boundary')
-            H = rom_sweep_fi(self.rom_ops, self.s_vals, Zs)
-            label = f'ROM Nrb={self.Nrb}, Zs={Zs}'
-        elif self.bc_type == 'FD':
-            if d_mat is None:
-                raise ValueError('d_mat required for FD boundary')
-            H = rom_sweep_fd(self.rom_ops, self.s_vals, self.sigma_flow, d_mat)
-            label = f'ROM Nrb={self.Nrb}, d={d_mat}m'
-        else:
-            raise ValueError(f'Unknown bc_type: {self.bc_type}')
+    def solve(self, Zs=None, d_mat=None, **material_overrides):
+        """Evaluate ROM at new parameter values. Returns ImpulseResponse.
 
-        ir = laplace_to_ir(H, self.sigma_w, self.b_w, self.t_eval)
+        For FI: provide Zs
+        For per-surface: provide keyword args matching surface names
+            rom.solve(ceiling=500, floor=8000)
+        """
+        M_r = self.rom_ops['M_r']
+        S_r = self.rom_ops['S_r']
+        f_r = self.rom_ops['f_r']
+        obs = self.rom_ops['obs']
+        Br_per = self.rom_ops.get('Br_r_per_surface', {})
+
+        # Build material map: start with training defaults, override
+        Z_map = dict(self.material_map)
+        if Zs is not None:
+            # Uniform impedance on all surfaces
+            for k in self.B_labels_keys:
+                Z_map[k] = Zs
+        Z_map.update(material_overrides)
+
+        Ns = len(self.s_vals)
+        H = np.zeros(Ns, dtype=complex)
+
+        for i, s in enumerate(self.s_vals):
+            # Affine assembly: Br_r = sum (1/Z_label) * Br_r_label
+            Br_r = np.zeros_like(M_r)
+            for label, Br_r_label in Br_per.items():
+                Z = Z_map.get(label, 50000)
+                Br_r += Br_r_label / Z
+
+            A_r = s**2 * M_r + C_AIR**2 * S_r + s * Br_r
+            a = np.linalg.solve(A_r, s * f_r)
+            H[i] = obs @ a
+
+        ir, _ = ifft_to_ir(H, self.freqs, self.sigma, self.t_max, self.fs)
+        label = f'ROM Nrb={self.Nrb}'
         return ImpulseResponse(ir, self.fs, label)
 
 
@@ -303,61 +328,95 @@ class Room:
 
     # ── ROM ──────────────────────────────────────────────────
 
-    def build_rom(self, Z_train=None, d_train=None, Ns=None,
-                  sigma_w=None, b_w=None, eps_pod=1e-6, fs=44100,
-                  t_max=0.1):
+    def build_rom(self, Z_train=None, d_train=None, material_variations=None,
+                  Ns=None, f_max=500, eps_pod=1e-6, fs=44100, t_max=1.0):
         """Build parametric ROM from training parameter values.
 
         For FI: provide Z_train (list of impedance values).
         For FD: provide d_train (list of thickness values).
+        For per-surface: provide material_variations dict:
+            {'ceiling': [500, 1000, 2000], 'floor': [3000, 8000]}
+            Training uses all combinations.
 
         Returns ROM object for fast parametric queries.
         """
         self._check_ready()
+        Ns = Ns or 500
 
-        if self.mesh.ndim == 2:
-            Ns = Ns or 1000
-            sigma_w = sigma_w or 10.0
-            b_w = b_w or 1000.0
-        else:
-            Ns = Ns or 500
-            sigma_w = sigma_w or 20.0
-            b_w = b_w or 800.0
+        # Use IFFT frequencies for long IRs
+        s_vals, freqs, sigma = ifft_frequencies(f_max, Ns)
+        B_labels = self.ops.get('B_labels', {})
 
-        s_vals, _ = weeks_s_values(sigma_w, b_w, Ns)
+        from scipy.sparse.linalg import spsolve
+        from scipy import sparse
 
-        # Collect snapshots
         all_snaps = []
-        if self._bc_type == 'FI':
-            if Z_train is None:
-                raise ValueError('Z_train required for FI ROM')
+
+        if self._bc_type == 'PER_SURFACE' and material_variations:
+            # Generate training configs from material_variations
+            import itertools
+            surfaces = list(material_variations.keys())
+            Z_lists = [material_variations[s] for s in surfaces]
+            combos = list(itertools.product(*Z_lists))
+            print(f'  {len(combos)} material combinations x {Ns} frequencies')
+
+            for combo in combos:
+                Z_map = dict(zip(surfaces, combo))
+                # Fill in non-varied surfaces from current material_map
+                for s, Z in getattr(self, '_material_map', {}).items():
+                    if s not in Z_map:
+                        Z_map[s] = Z
+                print(f'  Training: {Z_map}')
+                for s in s_vals:
+                    Br = np.zeros(self.N)
+                    for face, Z in Z_map.items():
+                        if face in B_labels:
+                            Br += C_AIR**2 * RHO_AIR * B_labels[face] / Z
+                    sig, omg = s.real, s.imag
+                    Kr = self._c2S + sparse.diags((sig**2-omg**2)*self._M + sig*Br, format='csc')
+                    Kc = sparse.diags(2*sig*omg*self._M + omg*Br, format='csc')
+                    A = sparse.bmat([[Kr,-Kc],[Kc,Kr]], format='csc')
+                    rhs = np.concatenate([sig*self._p0*self._M, omg*self._p0*self._M])
+                    x = spsolve(A, rhs)
+                    all_snaps.append(x[:self.N] + 1j*x[self.N:])
+
+        elif self._bc_type == 'FI' and Z_train:
             for Zs in Z_train:
                 print(f'  Snapshots Zs={Zs}...')
-                all_snaps.extend(
-                    sweep_fi_fullfield(self._c2S, self._M, self._B,
-                                       self._p0, self.N, s_vals, Zs))
-        elif self._bc_type == 'FD':
-            if d_train is None:
-                raise ValueError('d_train required for FD ROM')
-            for d in d_train:
-                print(f'  Snapshots d={d}...')
-                all_snaps.extend(
-                    sweep_fd_fullfield(self._c2S, self._M, self._B,
-                                       self._p0, self.N, s_vals,
-                                       self._bc_params['sigma_flow'], d))
+                for s in s_vals:
+                    Br = C_AIR**2 * RHO_AIR * self._B / Zs
+                    sig, omg = s.real, s.imag
+                    Kr = self._c2S + sparse.diags((sig**2-omg**2)*self._M + sig*Br, format='csc')
+                    Kc = sparse.diags(2*sig*omg*self._M + omg*Br, format='csc')
+                    A = sparse.bmat([[Kr,-Kc],[Kc,Kr]], format='csc')
+                    rhs = np.concatenate([sig*self._p0*self._M, omg*self._p0*self._M])
+                    x = spsolve(A, rhs)
+                    all_snaps.append(x[:self.N] + 1j*x[self.N:])
+        else:
+            raise ValueError('Provide Z_train, d_train, or material_variations')
 
-        # Build basis
-        print('  SVD...')
+        print(f'  SVD ({len(all_snaps)} snapshots)...')
         Psi, Nrb, sv = build_basis(all_snaps, eps_pod)
         print(f'  Nrb = {Nrb}')
         del all_snaps
 
-        # Project
-        rom_ops = project_operators(self.ops, Psi, self._p0, self._rec_idx)
+        # Project operators: M_r, S_r, and per-surface Br_r
+        M_r = Psi.T @ (self._M[:, None] * Psi)
+        S_r = Psi.T @ self.ops['S'].dot(Psi)
+        Br_r_per_surface = {}
+        for label, B_diag in B_labels.items():
+            Br_r_per_surface[label] = Psi.T @ (
+                C_AIR**2 * RHO_AIR * B_diag[:, None] * Psi)
+        f_r = Psi.T @ (self._p0 * self._M)
+        obs = Psi[self._rec_idx, :].copy()
 
-        return ROM(rom_ops, s_vals, sigma_w, b_w, fs, t_max,
-                   self._bc_type,
-                   sigma_flow=self._bc_params.get('sigma_flow'))
+        rom_ops = dict(M_r=M_r, S_r=S_r, Br_r_per_surface=Br_r_per_surface,
+                       f_r=f_r, obs=obs)
+
+        return ROM(rom_ops, s_vals, freqs, sigma, fs, t_max,
+                   bc_type=self._bc_type,
+                   material_map=getattr(self, '_material_map', {}),
+                   B_labels_keys=list(B_labels.keys()))
 
     def _check_ready(self):
         if self._p0 is None:
