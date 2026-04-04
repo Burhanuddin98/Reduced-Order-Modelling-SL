@@ -63,6 +63,39 @@ ir.plot()
 
 ---
 
+## Arbitrary Geometry
+
+Load any closed 3D geometry — STL, OBJ, or Gmsh files. Surfaces are auto-detected by normal direction.
+
+```python
+# From STL (requires watertight mesh)
+room = Room.from_stl('concert_hall.stl', f_max=400)
+
+# From OBJ
+room = Room.from_obj('bedroom.obj', f_max=300)
+
+# From Gmsh .geo or .msh (Physical Surface tags become material labels)
+room = Room.from_gmsh('L_shaped.geo', f_max=250)
+
+# Per-surface materials (auto-detected: floor, ceiling, wall_north, etc.)
+room.set_material('floor', 'carpet_thick')
+room.set_material('ceiling', 'acoustic_panel')
+room.set_material('wall_north', 'glass')
+room.set_material('wall_south', 'concrete')
+
+room.set_source(1.0, 1.0, 1.2)
+room.set_receiver(3.0, 4.0, 1.0)
+
+ir = room.solve(t_max=0.3, f_max=250)
+print(f'T30 = {ir.T30:.3f}s')
+```
+
+Interior volume is automatically meshed with P1 tetrahedra via Gmsh. Mesh resolution is auto-computed from `f_max` (6 points per wavelength).
+
+> **Note:** STL/OBJ import requires watertight (closed, manifold) geometry.
+
+---
+
 ## Parametric ROM
 
 Build the ROM **once** from a few training solves. Then query at **any** parameter value instantly.
@@ -125,10 +158,14 @@ ir_thick = rom.solve(d_mat=0.15)   # 150mm absorber
 |--------|-------------|
 | `Room.box_2d(Lx, Ly, ne=20, order=4)` | 2D rectangular room |
 | `Room.box_3d(Lx, Ly, Lz, ne=8, order=4)` | 3D box room |
+| `Room.from_gmsh(path, f_max=500)` | Arbitrary geometry from Gmsh .geo/.msh |
+| `Room.from_stl(path, f_max=500)` | Arbitrary geometry from STL file |
+| `Room.from_obj(path, f_max=500)` | Arbitrary geometry from OBJ file |
 | `.set_source(*pos, sigma=0.2)` | Gaussian pulse source position |
 | `.set_receiver(*pos)` | Receiver position |
 | `.set_boundary_fi(Zs)` | Frequency-independent impedance [Pa s/m] |
 | `.set_boundary_fd(sigma_flow, d_mat)` | Miki porous absorber on rigid backing |
+| `.set_material(surface, name_or_Z)` | Per-surface material assignment |
 | `.solve(t_max, fs, Ns)` | Full-order solve → `ImpulseResponse` |
 | `.build_rom(Z_train= or d_train=)` | Build parametric ROM → `ROM` |
 

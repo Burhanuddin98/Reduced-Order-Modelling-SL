@@ -29,14 +29,24 @@ def compute_ir(config):
     """CHORAS-compatible task.
 
     config = {
-        'geometry': {'type': 'box', 'dimensions': [Lx, Ly, Lz]},
+        'geometry': {
+            'type': 'box',              # 'box', 'stl', 'obj', or 'gmsh'
+            'dimensions': [Lx, Ly, Lz], # for 'box' type
+            'path': '/path/to/file',    # for 'stl', 'obj', 'gmsh' types
+            'f_max': 500,               # mesh resolution target [Hz]
+        },
         'source': {'position': [x, y, z], 'sigma': 0.2},
         'receiver': {'position': [x, y, z]},
         'boundary': {
-            'type': 'frequency_independent',  # or 'frequency_dependent'
+            'type': 'frequency_independent',  # or 'frequency_dependent' or 'per_surface'
             'impedance': 5000,                 # for FI
             'flow_resistivity': 10000,         # for FD
             'thickness': 0.05,                 # for FD
+            'surfaces': {                      # for per_surface
+                'floor': 'carpet_thick',
+                'ceiling': 'acoustic_panel',
+                'walls': 'plaster',
+            },
         },
         'simulation': {
             't_max': 0.1,
@@ -44,11 +54,24 @@ def compute_ir(config):
         }
     }
     """
-    dims = config['geometry']['dimensions']
-    if len(dims) == 2:
-        room = Room.box_2d(dims[0], dims[1])
+    geo = config['geometry']
+    geo_type = geo.get('type', 'box')
+    f_max = geo.get('f_max', 500)
+
+    if geo_type == 'box':
+        dims = geo['dimensions']
+        if len(dims) == 2:
+            room = Room.box_2d(dims[0], dims[1])
+        else:
+            room = Room.box_3d(dims[0], dims[1], dims[2])
+    elif geo_type == 'stl':
+        room = Room.from_stl(geo['path'], f_max=f_max)
+    elif geo_type == 'obj':
+        room = Room.from_obj(geo['path'], f_max=f_max)
+    elif geo_type == 'gmsh':
+        room = Room.from_gmsh(geo['path'], f_max=f_max)
     else:
-        room = Room.box_3d(dims[0], dims[1], dims[2])
+        raise ValueError(f'Unknown geometry type: {geo_type}')
 
     src = config['source']['position']
     room.set_source(*src, sigma=config['source'].get('sigma', 0.2))
@@ -60,6 +83,9 @@ def compute_ir(config):
     elif bc['type'] == 'frequency_dependent':
         room.set_boundary_fd(sigma_flow=bc['flow_resistivity'],
                              d_mat=bc['thickness'])
+    elif bc['type'] == 'per_surface':
+        for surface, material in bc.get('surfaces', {}).items():
+            room.set_material(surface, material)
 
     sim = config['simulation']
     ir = room.solve(t_max=sim['t_max'], fs=sim['fs'])
