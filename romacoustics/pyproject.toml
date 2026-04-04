@@ -4,12 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "romacoustics"
-version = "0.1.0"
-description = "Reduced Order Modelling for Room Acoustics — Laplace-domain RBM"
+version = "0.2.0"
+description = "Reduced Order Modelling for Room Acoustics — Laplace-domain RBM with arbitrary geometry"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.8"
 dependencies = ["numpy", "scipy", "matplotlib"]
 
+[project.optional-dependencies]
+geometry = ["gmsh"]
+
 [project.urls]
 Homepage = "https://github.com/Burhanuddin98/Reduced-Order-Modelling-SL"
+
+[tool.setuptools.packages.find]
+include = ["romacoustics*"]
