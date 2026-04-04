@@ -1,107 +1,210 @@
-# romacoustics
+<p align="center">
+  <h1 align="center">romacoustics</h1>
+  <p align="center">
+    <strong>Reduced Order Modelling for Room Acoustics</strong><br>
+    100-10,000x faster impulse responses with parametric boundaries
+  </p>
+  <p align="center">
+    <a href="#install">Install</a> &bull;
+    <a href="#quick-start">Quick Start</a> &bull;
+    <a href="#parametric-rom">ROM</a> &bull;
+    <a href="#api-reference">API</a> &bull;
+    <a href="#validation">Validation</a> &bull;
+    <a href="CHORAS_INTEGRATION.md">CHORAS Integration</a>
+  </p>
+</p>
 
-Open-source Reduced Order Modelling for Room Acoustics.
+---
 
-Implements the Laplace-domain Reduced Basis Method from:
+Open-source Python implementation of the Laplace-domain Reduced Basis Method from:
 
-> Sampedro Llopis et al. (2022), "Reduced basis methods for numerical room acoustic simulations with parametrized boundaries", *JASA* 152(2), pp. 851-865.
+> H. Sampedro Llopis, A.P. Engsig-Karup, C.-H. Jeong, F. Pind, J.S. Hesthaven (2022),
+> *"Reduced basis methods for numerical room acoustic simulations with parametrized boundaries"*,
+> J. Acoust. Soc. Am. 152(2), pp. 851-865.
+> [DOI: 10.1121/10.0012696](https://doi.org/10.1121/10.0012696)
+
+**No GPU required. No compiled code. Pure Python.**
+
+```
+                    OFFLINE (once)                          ONLINE (instant)
+    ┌─────────────────────────────────┐      ┌──────────────────────────┐
+    │  SEM Mesh (GLL nodes)           │      │  New boundary parameter  │
+    │       ↓                         │      │       ↓                  │
+    │  Laplace FOM at training params │      │  Nrb × Nrb dense solve  │
+    │       ↓                         │      │       ↓                  │
+    │  Snapshot matrix (N × Ns)       │      │  Weeks ILT → IR         │
+    │       ↓                         │      │       ↓                  │
+    │  SVD → Reduced basis (Nrb << N) │      │  T30, C80, WAV          │
+    └─────────────────────────────────┘      └──────────────────────────┘
+         ~10 min (2D) / ~2 hr (3D)                  ~0.03 seconds
+```
+
+---
 
 ## Install
 
 ```bash
+git clone https://github.com/Burhanuddin98/Reduced-Order-Modelling-SL.git
+cd Reduced-Order-Modelling-SL/romacoustics
 pip install -e .
 ```
 
-Dependencies: `numpy`, `scipy`, `matplotlib`.
+Requirements: Python 3.8+, `numpy`, `scipy`, `matplotlib` (auto-installed).
+
+---
 
 ## Quick Start
 
 ```python
 from romacoustics import Room
 
-# Create a 2D room (2m x 2m)
-room = Room.box_2d(2.0, 2.0, ne=20, order=4)
+room = Room.box_2d(2.0, 2.0, ne=20, order=4)   # 6561 DOFs
 room.set_source(1.0, 1.0, sigma=0.2)
 room.set_receiver(0.2, 0.2)
 room.set_boundary_fi(Zs=5000)
 
-# Full-order solve → impulse response
 ir = room.solve(t_max=0.1)
-print(ir.T30, ir.C80)  # ISO 3382 metrics
-ir.to_wav('output.wav')
+
+print(f'T30 = {ir.T30:.3f}s')
+print(f'C80 = {ir.C80:.1f} dB')
+
+ir.to_wav('room_impulse.wav')
 ir.plot()
 ```
 
-## Parametric ROM (100-10000x speedup)
+---
 
-Build the ROM once from training data, then query instantly:
+## Parametric ROM
+
+Build the ROM **once** from a few training solves. Then query at **any** parameter value instantly.
 
 ```python
-# Build ROM from 3 training impedances (~10 min)
+# Offline: ~10 min for 3 training impedances
 rom = room.build_rom(Z_train=[500, 8000, 15500])
 
-# Query at ANY impedance (instant)
-ir1 = rom.solve(Zs=3000)   # ~0.03s
-ir2 = rom.solve(Zs=12000)  # ~0.03s
-ir3 = rom.solve(Zs=7777)   # ~0.03s
+# Online: ~0.03s each
+ir1 = rom.solve(Zs=3000)    # low absorption
+ir2 = rom.solve(Zs=12000)   # high absorption  
+ir3 = rom.solve(Zs=7777)    # anything in between
 ```
 
-## 3D with frequency-dependent boundaries
+### 3D with frequency-dependent absorbers
 
 ```python
-room = Room.box_3d(1.0, 1.0, 1.0, ne=8, order=4)
+room = Room.box_3d(1.0, 1.0, 1.0, ne=8, order=4)   # 35,937 DOFs
 room.set_source(0.5, 0.5, 0.5, sigma=0.2)
 room.set_receiver(0.25, 0.1, 0.8)
-room.set_boundary_fd(sigma_flow=10000, d_mat=0.05)
+room.set_boundary_fd(sigma_flow=10000, d_mat=0.05)   # Miki porous absorber
 
 ir = room.solve(t_max=0.1)
 ir.plot_spectrogram()
 
-# Parametric ROM over material thickness
+# Parametric over material thickness
 rom = room.build_rom(d_train=[0.02, 0.12, 0.22])
-ir2 = rom.solve(d_mat=0.07)
+ir_thin  = rom.solve(d_mat=0.03)   # 30mm absorber
+ir_thick = rom.solve(d_mat=0.15)   # 150mm absorber
 ```
 
-## Validated Results
+---
 
-FOM validated against:
-- Analytical eigenfrequencies (rigid rect): 9/10 peaks match within 2.3 Hz
-- Time-domain RK4 solver: relative error 6.85e-4
+## Validation
 
-ROM validated against FOM:
-- 2D (N=6561): Nrb=17, speedup 9493x, relative error 0.5%
-- 3D (N=35937): Nrb=16, speedup 6750x, relative error 0.8%
+### FOM correctness
 
-## API
+| Test | Method | Result |
+|------|--------|--------|
+| Eigenfrequencies (rigid rect) | FFT peaks vs analytical | 9/10 match within 2.3 Hz |
+| Laplace vs Time-domain (FI) | RK4 p-Phi cross-check | Relative error 6.85e-4 |
+| Laplace vs Time-domain (rigid) | Three-way comparison | Relative error 2.49e-2 |
+
+### ROM accuracy
+
+| Case | N (FOM) | Nrb (ROM) | Relative Error | Speedup |
+|------|---------|-----------|---------------|---------|
+| 2D FI, Zs=5000 | 6,561 | 17 | 0.5% | 9,493x |
+| 2D FI, Zs=15000 | 6,561 | 17 | 0.6% | 11,557x |
+| 3D FD, d=0.05m | 35,937 | 16 | 0.8% | 6,750x |
+| 3D FD, d=0.15m | 35,937 | 16 | 0.8% | 9,202x |
+
+---
+
+## API Reference
 
 ### `Room`
-- `Room.box_2d(Lx, Ly, ne=20, order=4)` — 2D rectangular room
-- `Room.box_3d(Lx, Ly, Lz, ne=8, order=4)` — 3D box room
-- `.set_source(*pos, sigma=0.2)` — Gaussian pulse source
-- `.set_receiver(*pos)` — receiver position
-- `.set_boundary_fi(Zs)` — frequency-independent impedance
-- `.set_boundary_fd(sigma_flow, d_mat)` — Miki porous absorber
-- `.solve(t_max, fs, Ns)` → `ImpulseResponse`
-- `.build_rom(Z_train or d_train)` → `ROM`
+
+| Method | Description |
+|--------|-------------|
+| `Room.box_2d(Lx, Ly, ne=20, order=4)` | 2D rectangular room |
+| `Room.box_3d(Lx, Ly, Lz, ne=8, order=4)` | 3D box room |
+| `.set_source(*pos, sigma=0.2)` | Gaussian pulse source position |
+| `.set_receiver(*pos)` | Receiver position |
+| `.set_boundary_fi(Zs)` | Frequency-independent impedance [Pa s/m] |
+| `.set_boundary_fd(sigma_flow, d_mat)` | Miki porous absorber on rigid backing |
+| `.solve(t_max, fs, Ns)` | Full-order solve → `ImpulseResponse` |
+| `.build_rom(Z_train= or d_train=)` | Build parametric ROM → `ROM` |
 
 ### `ROM`
-- `.solve(Zs=... or d_mat=...)` → `ImpulseResponse`
+
+| Method | Description |
+|--------|-------------|
+| `.solve(Zs= or d_mat=)` | Instant query → `ImpulseResponse` |
+| `.Nrb` | Number of reduced basis vectors |
 
 ### `ImpulseResponse`
-- `.signal`, `.t`, `.fs` — raw data
-- `.T30`, `.T20`, `.EDT`, `.C80`, `.D50` — ISO 3382 metrics
-- `.edc_db` — energy decay curve
-- `.to_wav(path)`, `.to_npz(path)` — export
-- `.plot()`, `.plot_spectrogram()` — visualization
 
-## Method
+| Property / Method | Description |
+|-------------------|-------------|
+| `.signal`, `.t`, `.fs` | Raw data |
+| `.T30`, `.T20`, `.EDT` | Reverberation times [s] |
+| `.C80`, `.D50` | Clarity and definition |
+| `.edc_db` | Energy decay curve [dB] |
+| `.to_wav(path)` | Export 16-bit WAV |
+| `.to_npz(path)` | Export numpy archive |
+| `.plot()` | Waveform + EDC plot |
+| `.plot_spectrogram()` | Time-frequency plot |
 
-1. **SEM mesh** — Gauss-Lobatto-Legendre spectral elements (Kronecker assembly)
-2. **Laplace-domain FOM** — solve `(s²M + c²S + s·Br)p = s·M·p0` at complex frequencies
-3. **Weeks ILT** — Laguerre polynomial expansion to reconstruct time-domain IR
-4. **SVD basis** — cotangent-lift snapshot matrix → truncated SVD
-5. **ROM projection** — Galerkin projection onto reduced basis (Nrb << N)
-6. **Online query** — dense Nrb × Nrb solve per frequency (instant)
+---
+
+## How It Works
+
+1. **Spectral Element Method** — GLL quadrature on structured quad/hex mesh. Kronecker product assembly gives diagonal mass matrix (no linear solve for mass).
+
+2. **Laplace-domain FOM** — Transform wave equation to complex frequency domain: `(s²M + c²S + s·Br)p = s·M·p0`. One sparse linear solve per frequency.
+
+3. **Weeks method** — Inverse Laplace transform via Laguerre polynomial expansion. Maps complex s-plane to unit circle, FFT gives expansion coefficients.
+
+4. **Reduced basis** — Cotangent-lift SVD of snapshot matrix. Captures 99.9999% of energy in 15-20 vectors out of 6000-36000 DOFs.
+
+5. **Galerkin projection** — Project all operators onto reduced basis. Online solve is a dense Nrb × Nrb system (microseconds).
+
+---
+
+## CHORAS Integration
+
+See [CHORAS_INTEGRATION.md](CHORAS_INTEGRATION.md) for:
+- Celery task wrapper (copy-paste ready)
+- Dockerfile
+- JSON configuration schema
+- Parametric ROM workflow
+
+---
+
+## Cite
+
+If you use this code, please cite the original paper:
+
+```bibtex
+@article{sampedro2022,
+  author  = {Sampedro Llopis, Hermes and Engsig-Karup, Allan P. and Jeong, Cheol-Ho and Pind, Finnur and Hesthaven, Jan S.},
+  title   = {Reduced basis methods for numerical room acoustic simulations with parametrized boundaries},
+  journal = {J. Acoust. Soc. Am.},
+  volume  = {152},
+  number  = {2},
+  pages   = {851--865},
+  year    = {2022},
+  doi     = {10.1121/10.0012696}
+}
+```
 
 ## License
 
