@@ -24,19 +24,9 @@ Open-source Python implementation of the Laplace-domain Reduced Basis Method fro
 
 **No GPU required. No compiled code. Pure Python.**
 
-```
-                    OFFLINE (once)                          ONLINE (instant)
-    ┌─────────────────────────────────┐      ┌──────────────────────────┐
-    │  SEM Mesh (GLL nodes)           │      │  New boundary parameter  │
-    │       ↓                         │      │       ↓                  │
-    │  Laplace FOM at training params │      │  Nrb × Nrb dense solve  │
-    │       ↓                         │      │       ↓                  │
-    │  Snapshot matrix (N × Ns)       │      │  Weeks ILT → IR         │
-    │       ↓                         │      │       ↓                  │
-    │  SVD → Reduced basis (Nrb << N) │      │  T30, C80, WAV          │
-    └─────────────────────────────────┘      └──────────────────────────┘
-         ~10 min (2D) / ~2 hr (3D)                  ~0.03 seconds
-```
+<p align="center">
+  <img src="pipeline.png" alt="Pipeline" width="700">
+</p>
 
 ---
 
