@@ -1,32 +1,55 @@
 <p align="center">
   <img src="logo.png" alt="romacoustics" width="400">
-  <p align="center">
-    <strong>100-10,000x faster impulse responses with parametric boundaries</strong>
-  </p>
-  <p align="center">
-    <a href="#install">Install</a> &bull;
-    <a href="#quick-start">Quick Start</a> &bull;
-    <a href="#parametric-rom">ROM</a> &bull;
-    <a href="#api-reference">API</a> &bull;
-    <a href="#validation">Validation</a> &bull;
-    <a href="CHORAS_INTEGRATION.md">CHORAS Integration</a>
-  </p>
 </p>
+
+# romacoustics
+
+Laplace-domain Reduced Basis Method for room acoustic impulse response computation. Based on:
+
+> Sampedro Llopis et al. (2022), "Reduced basis methods for numerical room acoustic simulations with parametrized boundaries", JASA 152(2), pp. 851-865. [DOI: 10.1121/10.0012696](https://doi.org/10.1121/10.0012696)
+
+Pure Python. No compiled code. Optional GPU acceleration via CuPy.
 
 ---
 
-Open-source Python implementation of the Laplace-domain Reduced Basis Method from:
+## What it does
 
-> H. Sampedro Llopis, A.P. Engsig-Karup, C.-H. Jeong, F. Pind, J.S. Hesthaven (2022),
-> *"Reduced basis methods for numerical room acoustic simulations with parametrized boundaries"*,
-> J. Acoust. Soc. Am. 152(2), pp. 851-865.
-> [DOI: 10.1121/10.0012696](https://doi.org/10.1121/10.0012696)
+Computes room impulse responses by solving the wave equation in the Laplace domain using finite elements. Supports parametric reduced-order models for fast material sweeps.
 
-**No GPU required. No compiled code. Pure Python.**
+```
+Geometry (box / STL / OBJ / Gmsh)
+    |
+    v
+Tet mesh (Gmsh, P1 elements)
+    |
+    v
+FEM assembly (M, S, B operators)
+    |
+    v
+Laplace-domain FOM: solve (s^2 M + c^2 S + s Br) p = s M p0
+at N_freq complex frequencies s = sigma + i*omega
+    |
+    v
+Time reconstruction (IFFT with Laplace shift correction)
+    |
+    v
+Impulse response -> T30, EDT, C80, D50 (ISO 3382)
+```
 
-<p align="center">
-  <img src="pipeline.png" alt="Pipeline" width="700">
-</p>
+For parametric studies (testing many materials on the same room):
+
+```
+FOM solves at 3 training impedances (offline, minutes)
+    |
+    v
+SVD of snapshot matrix -> reduced basis (15-20 vectors)
+    |
+    v
+Project operators onto basis -> Nrb x Nrb dense system
+    |
+    v
+Online: solve Nrb x Nrb system per frequency (milliseconds)
+```
 
 ---
 
@@ -38,11 +61,18 @@ cd Reduced-Order-Modelling-SL/romacoustics
 pip install -e .
 ```
 
-Requirements: Python 3.8+, `numpy`, `scipy`, `matplotlib` (auto-installed).
+For arbitrary geometry support (STL/OBJ/Gmsh files):
+```bash
+pip install gmsh
+```
+
+Requirements: Python 3.8+, numpy, scipy, matplotlib.
 
 ---
 
-## Quick Start
+## Quick start
+
+### 2D rectangular room
 
 ```python
 from romacoustics import Room
@@ -61,167 +91,170 @@ ir.to_wav('room_impulse.wav')
 ir.plot()
 ```
 
----
-
-## Arbitrary Geometry
-
-Load any closed 3D geometry — STL, OBJ, or Gmsh files. Surfaces are auto-detected by normal direction.
+### 3D box room with per-surface materials
 
 ```python
-# From STL (requires watertight mesh)
-room = Room.from_stl('concert_hall.stl', f_max=400)
-
-# From OBJ
-room = Room.from_obj('bedroom.obj', f_max=300)
-
-# From Gmsh .geo or .msh (Physical Surface tags become material labels)
-room = Room.from_gmsh('L_shaped.geo', f_max=250)
-
-# Per-surface materials (auto-detected: floor, ceiling, wall_north, etc.)
+room = Room.box_3d(4.0, 3.0, 2.5, ne=6, order=4)
+room.set_source(1.0, 1.0, 1.2)
+room.set_receiver(3.0, 2.0, 1.0)
 room.set_material('floor', 'carpet_thick')
 room.set_material('ceiling', 'acoustic_panel')
-room.set_material('wall_north', 'glass')
-room.set_material('wall_south', 'concrete')
+room.set_material('x_min', 'plaster')
+room.set_material('x_max', 'plaster')
 
-room.set_source(1.0, 1.0, 1.2)
-room.set_receiver(3.0, 4.0, 1.0)
-
-ir = room.solve(t_max=0.3, f_max=250)
-print(f'T30 = {ir.T30:.3f}s')
+ir = room.solve(t_max=0.3, f_max=300, Ns=200)
 ```
 
-Interior volume is automatically meshed with P1 tetrahedra via Gmsh. Mesh resolution is auto-computed from `f_max` (6 points per wavelength).
+### Arbitrary geometry
 
-> **Note:** STL/OBJ import requires watertight (closed, manifold) geometry.
-
----
-
-## Parametric ROM
-
-Build the ROM **once** from a few training solves. Then query at **any** parameter value instantly.
+Requires `gmsh`. Input must be a closed (watertight) surface.
 
 ```python
-# Offline: ~10 min for 3 training impedances
+# From Gmsh .geo file
+room = Room.from_gmsh('L_shaped_room.geo', f_max=200)
+
+# From OBJ or STL (must be watertight)
+room = Room.from_obj('room.obj', f_max=200)
+room = Room.from_stl('room.stl', f_max=200)
+
+# Surfaces are auto-detected by face normal direction
+# Typical labels: floor, ceiling, wall_north, wall_south, wall_east, wall_west
+room.set_material('floor', 'carpet_thick')
+room.set_material('ceiling', 'plaster')
+
+ir = room.solve(t_max=0.3, f_max=200, Ns=150)
+```
+
+The interior is meshed with P1 tetrahedra. Mesh resolution is set by `f_max` at 6 points per wavelength.
+
+### Parametric ROM
+
+Build the reduced model once from a few training solves, then query at any impedance value:
+
+```python
+room = Room.box_2d(2.0, 2.0, ne=15, order=4)
+room.set_source(1.0, 1.0, sigma=0.2)
+room.set_receiver(0.2, 0.2)
+room.set_boundary_fi(Zs=5000)
+
+# Offline: 3 FOM solves
 rom = room.build_rom(Z_train=[500, 8000, 15500])
 
-# Online: ~0.03s each
-ir1 = rom.solve(Zs=3000)    # low absorption
-ir2 = rom.solve(Zs=12000)   # high absorption  
-ir3 = rom.solve(Zs=7777)    # anything in between
+# Online: milliseconds each
+ir1 = rom.solve(Zs=3000)
+ir2 = rom.solve(Zs=12000)
 ```
 
-### 3D with frequency-dependent absorbers
-
-```python
-room = Room.box_3d(1.0, 1.0, 1.0, ne=8, order=4)   # 35,937 DOFs
-room.set_source(0.5, 0.5, 0.5, sigma=0.2)
-room.set_receiver(0.25, 0.1, 0.8)
-room.set_boundary_fd(sigma_flow=10000, d_mat=0.05)   # Miki porous absorber
-
-ir = room.solve(t_max=0.1)
-ir.plot_spectrogram()
-
-# Parametric over material thickness
-rom = room.build_rom(d_train=[0.02, 0.12, 0.22])
-ir_thin  = rom.solve(d_mat=0.03)   # 30mm absorber
-ir_thick = rom.solve(d_mat=0.15)   # 150mm absorber
-```
+ROM is currently supported for uniform impedance sweeps only.
 
 ---
 
 ## Validation
 
-### FOM correctness
+### FOM accuracy
 
-| Test | Method | Result |
-|------|--------|--------|
-| Eigenfrequencies (rigid rect) | FFT peaks vs analytical | 9/10 match within 2.3 Hz |
-| Laplace vs Time-domain (FI) | RK4 p-Phi cross-check | Relative error 6.85e-4 |
-| Laplace vs Time-domain (rigid) | Three-way comparison | Relative error 2.49e-2 |
+| Test | Reference | Error |
+|------|-----------|-------|
+| Eigenfrequencies (2D rigid rectangle) | Analytical | 9/10 within 2.3 Hz |
+| Laplace vs time-domain (FI boundary) | RK4 p-Phi solver | 6.85e-4 relative |
+| Laplace vs time-domain (rigid) | Three-way comparison | 2.49e-2 relative |
+| BRAS Scene 9 eigenfrequencies (3D) | Measured RIRs | 15/15 match |
 
-### ROM accuracy
+### ROM accuracy (uniform impedance)
 
-| Case | N (FOM) | Nrb (ROM) | Relative Error | Speedup |
-|------|---------|-----------|---------------|---------|
-| 2D FI, Zs=5000 | 6,561 | 17 | 0.5% | 9,493x |
-| 2D FI, Zs=15000 | 6,561 | 17 | 0.6% | 11,557x |
-| 3D FD, d=0.05m | 35,937 | 16 | 0.8% | 6,750x |
-| 3D FD, d=0.15m | 35,937 | 16 | 0.8% | 9,202x |
+| Case | FOM DOFs | ROM basis | Error | Speedup |
+|------|----------|-----------|-------|---------|
+| 2D, Zs=5000 | 6,561 | 17 | 0.5% | 9,493x |
+| 2D, Zs=15000 | 6,561 | 17 | 0.6% | 11,557x |
+| 3D, d=0.05m | 35,937 | 16 | 0.8% | 6,750x |
+| 3D, d=0.15m | 35,937 | 16 | 0.8% | 9,202x |
+
+### Arbitrary geometry
+
+| Test | DOFs | Surfaces | Solve time | Result |
+|------|------|----------|------------|--------|
+| L-shaped room (.geo) | 3,662 | 6 auto-detected | 75s | T30=0.204s |
+| BRAS CR2 room (.obj) | 6,697 | 7 auto-detected | 289s | T30=0.326s |
 
 ---
 
-## API Reference
+## Limitations
 
-### `Room`
+- **Frequency range**: limited by mesh resolution. At f_max=500 Hz in 3D, expect ~35K DOFs and several minutes of solve time. Higher frequencies require finer meshes and proportionally longer solves.
+- **Arbitrary geometry**: STL and OBJ files must be watertight (closed, manifold). Non-watertight meshes will fail during volume meshing.
+- **Parametric ROM**: currently supports uniform impedance sweeps only. Per-surface parametric ROM is not yet implemented.
+- **Source model**: Gaussian pulse only. No source directivity.
+- **Boundary model**: locally-reacting impedance (frequency-independent or Miki model). No extended reaction or structural coupling.
+
+---
+
+## API reference
+
+### Room
 
 | Method | Description |
 |--------|-------------|
-| `Room.box_2d(Lx, Ly, ne=20, order=4)` | 2D rectangular room |
-| `Room.box_3d(Lx, Ly, Lz, ne=8, order=4)` | 3D box room |
-| `Room.from_gmsh(path, f_max=500)` | Arbitrary geometry from Gmsh .geo/.msh |
-| `Room.from_stl(path, f_max=500)` | Arbitrary geometry from STL file |
-| `Room.from_obj(path, f_max=500)` | Arbitrary geometry from OBJ file |
-| `.set_source(*pos, sigma=0.2)` | Gaussian pulse source position |
+| `Room.box_2d(Lx, Ly, ne, order)` | 2D rectangular room (structured SEM) |
+| `Room.box_3d(Lx, Ly, Lz, ne, order)` | 3D box room (structured SEM) |
+| `Room.from_gmsh(path, f_max)` | 3D room from Gmsh .geo/.msh file |
+| `Room.from_stl(path, f_max)` | 3D room from STL file (watertight) |
+| `Room.from_obj(path, f_max)` | 3D room from OBJ file (watertight) |
+| `.set_source(*pos, sigma)` | Gaussian pulse source position |
 | `.set_receiver(*pos)` | Receiver position |
-| `.set_boundary_fi(Zs)` | Frequency-independent impedance [Pa s/m] |
-| `.set_boundary_fd(sigma_flow, d_mat)` | Miki porous absorber on rigid backing |
-| `.set_material(surface, name_or_Z)` | Per-surface material assignment |
-| `.solve(t_max, fs, Ns)` | Full-order solve → `ImpulseResponse` |
-| `.build_rom(Z_train= or d_train=)` | Build parametric ROM → `ROM` |
+| `.set_boundary_fi(Zs)` | Uniform frequency-independent impedance |
+| `.set_boundary_fd(sigma_flow, d_mat)` | Uniform Miki porous absorber |
+| `.set_material(surface, name_or_Z)` | Per-surface material (by name or impedance) |
+| `.solve(t_max, fs, f_max, Ns)` | Compute impulse response |
+| `.build_rom(Z_train=)` | Build parametric ROM (uniform impedance only) |
 
-### `ROM`
-
-| Method | Description |
-|--------|-------------|
-| `.solve(Zs= or d_mat=)` | Instant query → `ImpulseResponse` |
-| `.Nrb` | Number of reduced basis vectors |
-
-### `ImpulseResponse`
+### ImpulseResponse
 
 | Property / Method | Description |
 |-------------------|-------------|
-| `.signal`, `.t`, `.fs` | Raw data |
-| `.T30`, `.T20`, `.EDT` | Reverberation times [s] |
-| `.C80`, `.D50` | Clarity and definition |
-| `.edc_db` | Energy decay curve [dB] |
+| `.signal`, `.t`, `.fs` | Time-domain data |
+| `.T30`, `.T20`, `.EDT` | Reverberation times (s) |
+| `.C80`, `.D50` | Clarity (dB), definition |
 | `.to_wav(path)` | Export 16-bit WAV |
 | `.to_npz(path)` | Export numpy archive |
-| `.plot()` | Waveform + EDC plot |
-| `.plot_spectrogram()` | Time-frequency plot |
+| `.plot()` | Waveform + energy decay curve |
+
+### Materials
+
+22 built-in materials. Use `list_materials()` to see all options.
+
+```python
+from romacoustics import list_materials
+list_materials()
+```
 
 ---
 
-## How It Works
+## How it works
 
-1. **Spectral Element Method** — GLL quadrature on structured quad/hex mesh. Kronecker product assembly gives diagonal mass matrix (no linear solve for mass).
+1. **Spatial discretization**: Spectral Element Method (box rooms, GLL quadrature, P=4) or P1 tetrahedral FEM (arbitrary geometry via Gmsh). Box rooms use Kronecker product assembly for a diagonal mass matrix.
 
-2. **Laplace-domain FOM** — Transform wave equation to complex frequency domain: `(s²M + c²S + s·Br)p = s·M·p0`. One sparse linear solve per frequency.
+2. **Laplace-domain formulation**: the wave equation is transformed to complex frequency s = sigma + i*omega. The positive real shift sigma regularises resonances. One sparse linear solve per frequency.
 
-3. **Weeks method** — Inverse Laplace transform via Laguerre polynomial expansion. Maps complex s-plane to unit circle, FFT gives expansion coefficients.
+3. **Time reconstruction**: IFFT of the one-sided transfer function with exponential correction for the Laplace shift.
 
-4. **Reduced basis** — Cotangent-lift SVD of snapshot matrix. Captures 99.9999% of energy in 15-20 vectors out of 6000-36000 DOFs.
-
-5. **Galerkin projection** — Project all operators onto reduced basis. Online solve is a dense Nrb × Nrb system (microseconds).
+4. **Reduced basis (optional)**: SVD of the solution snapshot matrix across training parameters. Galerkin projection reduces the system to a dense Nrb x Nrb problem.
 
 ---
 
-## CHORAS Integration
+## CHORAS integration
 
-See [CHORAS_INTEGRATION.md](CHORAS_INTEGRATION.md) for:
-- Celery task wrapper (copy-paste ready)
+See [CHORAS_INTEGRATION.md](CHORAS_INTEGRATION.md) for solver backend configuration:
+- Celery task wrapper
 - Dockerfile
-- JSON configuration schema
-- Parametric ROM workflow
+- JSON configuration schema (supports box, STL, OBJ, Gmsh geometry types)
 
 ---
 
 ## Cite
 
-If you use this code, please cite the original paper:
-
 ```bibtex
 @article{sampedro2022,
-  author  = {Sampedro Llopis, Hermes and Engsig-Karup, Allan P. and Jeong, Cheol-Ho and Pind, Finnur and Hesthaven, Jan S.},
+  author  = {Sampedro Llopis, H. and Engsig-Karup, A.P. and Jeong, C.-H. and Pind, F. and Hesthaven, J.S.},
   title   = {Reduced basis methods for numerical room acoustic simulations with parametrized boundaries},
   journal = {J. Acoust. Soc. Am.},
   volume  = {152},
